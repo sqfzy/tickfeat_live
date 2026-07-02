@@ -23,10 +23,11 @@ struct alignas(64) FactorSlot {
   std::atomic<std::uint64_t> seq{0};
   std::int64_t  ts_ns{0};        // 该行 1s 桶起点(数据 exch 时戳,ns)
   std::uint16_t symbol_lid{0};
-  std::uint16_t valid_mask{0};   // bit i = fi 暖机已满可信(f0..f9→bit0..9;mid→bit10)
+  std::uint16_t valid_mask{0};   // bit i = fi 暖机已满可信(f0..f9→bit0..9;mid→bit10;pdiff→bit11)
   std::uint32_t _rsvd{0};
   double        f[kNumFactors]{};
   double        mid{0.0};
+  double        pdiff{0.0};       // 瞬时跨所基差(OKX mid−BN mid)/BN mid×1e4 bps;无 bn as-of=NaN(f8/f9 是其滚动均值)
 };
 static_assert(std::is_trivially_copyable_v<FactorSlot>, "FactorSlot 必须 POD(SHM 契约)");
 static_assert(alignof(FactorSlot) == 64, "FactorSlot 一 cache line 对齐");
@@ -34,7 +35,7 @@ static_assert(offsetof(FactorSlot, seq) == 0, "seq 必须领头(seqlock)");
 
 // 生产者:seqlock 包住字段写入(偶 s → 奇 s+1 → payload → 偶 s+2)。
 inline void factor_write(FactorSlot& slot, std::int64_t ts_ns, std::uint16_t lid,
-                         std::uint16_t valid_mask, const double* f10, double mid) noexcept {
+                         std::uint16_t valid_mask, const double* f10, double mid, double pdiff) noexcept {
   namespace seqlock = gconf::shm::v2::seqlock;
   const std::uint64_t s = slot.seq.load(std::memory_order_relaxed);
   seqlock::begin(slot.seq, s + 1);
@@ -43,6 +44,7 @@ inline void factor_write(FactorSlot& slot, std::int64_t ts_ns, std::uint16_t lid
   slot.valid_mask = valid_mask;
   for (int i = 0; i < kNumFactors; ++i) slot.f[i] = f10[i];
   slot.mid = mid;
+  slot.pdiff = pdiff;
   seqlock::end(slot.seq, s + 2);
 }
 
@@ -56,11 +58,12 @@ inline void factor_write(FactorSlot& slot, std::int64_t ts_ns, std::uint16_t lid
   out.valid_mask = slot.valid_mask;
   for (int i = 0; i < kNumFactors; ++i) out.f[i] = slot.f[i];
   out.mid = slot.mid;
+  out.pdiff = slot.pdiff;
   return seqlock::verify(slot.seq, s1);
 }
 
 inline constexpr std::uint64_t kFactorSchemaHash =
-    gconf::shm::v2::schema_fnv("FactorSlot:seq8,ts8,lid2,vmask2,rsvd4,f10x8,mid8");
+    gconf::shm::v2::schema_fnv("FactorSlot:seq8,ts8,lid2,vmask2,rsvd4,f10x8,mid8,pdiff8");
 
 // 因子板:段头 + per-LID 槽。capacity = N_SYMS。
 struct FactorBoard {

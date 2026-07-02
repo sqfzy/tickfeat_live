@@ -32,5 +32,6 @@ int main(int argc, char** argv) {
   for (int i = 0; i < tflive::kNumFactors; ++i)
     std::printf("  %-14s = %+.6f   [%s]\n", names[i], s.f[i], (s.valid_mask & (1u << i)) ? "valid" : "warmup");
   std::printf("  mid_price      = %.6f\n", s.mid);
+  std::printf("  pdiff(bps)     = %+.6f   [%s]\n", s.pdiff, (s.valid_mask & (1u << 11)) ? "valid" : "no-bn");
   return 0;
 }

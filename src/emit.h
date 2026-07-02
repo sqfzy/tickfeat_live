@@ -1,6 +1,7 @@
 #pragma once
 // emit.h — 把各引擎新结算的秒行写进 FactorBoard(latest 写槽);可选逐行落 CSV(对拍/复现)。
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -38,23 +39,26 @@ inline std::uint16_t valid_mask_of(std::int64_t span_s) {
   return m;
 }
 
-// 写该 LID 的最新一行到段(µs→ns)。
-inline void write_latest(FactorBoard* out, int lid, const tick_feat::Features& fe, std::int64_t first_ts) {
+// 写该 LID 的最新一行到段(µs→ns)。pdiff 为该行瞬时基差(NaN=无 bn as-of),finite 则置 valid bit11。
+inline void write_latest(FactorBoard* out, int lid, const tick_feat::Features& fe,
+                         double pdiff, std::int64_t first_ts) {
   const std::size_t i = fe.rows() - 1;
   const std::int64_t span_s = (fe.ts_us[i] - first_ts) / 1'000'000;
+  std::uint16_t mask = valid_mask_of(span_s);
+  if (std::isfinite(pdiff)) mask |= (1u << 11);   // pdiff→bit11
   const double f10[kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
                                    fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
   factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
-               valid_mask_of(span_s), f10, fe.mid_price[i]);
+               mask, f10, fe.mid_price[i], pdiff);
 }
 
-// 逐行落 CSV(对拍/复现)。
+// 逐行落 CSV(对拍/复现)。pd 与 fe 逐行对齐(瞬时 pdiff 旁路)。
 inline void write_csv_rows(std::FILE* csv, int lid, const tick_feat::Features& fe,
-                           std::size_t from, std::size_t to) {
+                           const std::vector<double>& pd, std::size_t from, std::size_t to) {
   for (std::size_t k = from; k < to; ++k)
-    std::fprintf(csv, "%d,%lld,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g\n",
+    std::fprintf(csv, "%d,%lld,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g\n",
                  lid, static_cast<long long>(fe.ts_us[k]), fe.f0[k], fe.f1[k], fe.f2[k], fe.f3[k],
-                 fe.f4[k], fe.f5[k], fe.f6[k], fe.f7[k], fe.f8[k], fe.f9[k], fe.mid_price[k]);
+                 fe.f4[k], fe.f5[k], fe.f6[k], fe.f7[k], fe.f8[k], fe.f9[k], fe.mid_price[k], pd[k]);
 }
 
 // 各引擎有新结算秒 → 写段(+ CSV);返回本拍写出行数。
@@ -62,16 +66,17 @@ inline std::size_t emit_settled(EngineSet& eng, FactorBoard* out, EmitState& es,
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();
+    const auto& pd = eng[lid].pdiff_series();   // 瞬时 pdiff 旁路, 与 fe 逐行对齐
     const std::size_t r = fe.rows();
     if (r <= es.last_rows[lid]) continue;
     if (es.last_rows[lid] == 0) {
       es.first_row_ts[lid] = fe.ts_us.front();
       spdlog::debug("首因子 lid={} ts_us={}", lid, fe.ts_us.front());
     }
-    if (csv) write_csv_rows(csv, lid, fe, es.last_rows[lid], r);
+    if (csv) write_csv_rows(csv, lid, fe, pd, es.last_rows[lid], r);
     emitted += r - es.last_rows[lid];
     es.last_rows[lid] = r;
-    write_latest(out, lid, fe, es.first_row_ts[lid]);
+    write_latest(out, lid, fe, pd[r - 1], es.first_row_ts[lid]);
   }
   return emitted;
 }

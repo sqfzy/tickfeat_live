@@ -65,7 +65,7 @@ void run_replay(const tflive::HostConfig& cfg, tflive::Inputs& in,
   tflive::FeedState fst = tflive::make_feed_state();
   tflive::EmitState est = tflive::make_emit_state();
   std::FILE* csv = cfg.csv.empty() ? nullptr : std::fopen(cfg.csv.c_str(), "w");
-  if (csv) std::fprintf(csv, "lid,ts_us,f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,mid\n");
+  if (csv) std::fprintf(csv, "lid,ts_us,f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,mid,pdiff\n");
 
   Progress pr;
   spdlog::info("running: {} 币, poll {}µs", static_cast<int>(gconf::sym::N_SYMS), cfg.poll_us);
