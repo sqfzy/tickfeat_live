@@ -1,0 +1,6 @@
+build/
+.xmake/
+*.o
+tickfeat_live
+tickfeat_dump
+*.csv
