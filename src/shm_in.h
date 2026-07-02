@@ -47,13 +47,40 @@ struct Inputs {
   const v2::DepthBoard* bn_ob  = nullptr;    // BN 多档 book(取 L0)
 };
 
-// 连三段;任一失败返 false(启动期错误,main 转非零退出)。
+// 段头契约校验:逐字段比对本进程编译期常量。生产者(jt_dev3)独立编译,book25/trade 契约一旦漂移
+// 必须在 attach 期响亮失败, 而非静默算出错因子。magic/version/kind/abi 不符=布局根本对不上→致命(返 false);
+// schema_hash 漂移=尺寸都对只是字段描述串变→gconf 定为演进期可容忍,告警后继续(见 seg_header.h)。
+[[nodiscard]] inline bool check_segment(const char* name, const v2::SegHeader& hdr, v2::SegKind kind,
+                                        std::uint32_t entry_size, std::uint32_t capacity,
+                                        std::uint64_t schema_hash) {
+  const v2::SegError e = v2::seg_check(hdr, kind, entry_size, capacity, schema_hash);
+  if (e == v2::SegError::Ok) return true;
+  if (e == v2::SegError::SchemaDrift) {
+    spdlog::warn("段 {} schema 漂移: {}(本端 hash={:#x}, 段内 hash={:#x})—— 演进期容忍, 继续但因子可能偏",
+                 name, v2::seg_error_str(e), schema_hash, hdr.schema_hash);
+    return true;
+  }
+  spdlog::error("段 {} 契约不符: {}(kind 期望={} 段内={}; entry_size 期望={} 段内={}; capacity 期望={} 段内={})",
+                name, v2::seg_error_str(e), static_cast<int>(kind), static_cast<int>(hdr.kind),
+                entry_size, hdr.entry_size, capacity, hdr.capacity);
+  return false;
+}
+
+// 连三段;任一失败返 false(启动期错误,main 转非零退出)。mmap 成功后逐段跑 seg_check 卡契约。
 [[nodiscard]] inline bool attach_inputs(const HostConfig& cfg, Inputs& in) {
   in.okx_ob = map_segment<const v2::DepthBoard>(cfg.okx_depth.c_str(), false);
   in.okx_tr = map_segment<v2::TradeRing>(cfg.okx_trade.c_str(), false);
   in.bn_ob  = map_segment<const v2::DepthBoard>(cfg.bn_depth.c_str(), false);
   if (!in.okx_ob || !in.okx_tr || !in.bn_ob) return false;
-  spdlog::info("attach: okx_ob={} okx_tr={} bn_ob={}", cfg.okx_depth, cfg.okx_trade, cfg.bn_depth);
+  const bool ok =
+      check_segment(cfg.okx_depth.c_str(), in.okx_ob->hdr, v2::SegKind::Board,
+                    sizeof(v2::DepthBoardSlot), gconf::sym::N_SYMS, v2::kDepthBoardSchemaHash) &&
+      check_segment(cfg.okx_trade.c_str(), in.okx_tr->hdr, v2::SegKind::BcastRing,
+                    sizeof(v2::TradeEntry), v2::TRADE_RING_CAP, v2::kTradeSchemaHash) &&
+      check_segment(cfg.bn_depth.c_str(), in.bn_ob->hdr, v2::SegKind::Board,
+                    sizeof(v2::DepthBoardSlot), gconf::sym::N_SYMS, v2::kDepthBoardSchemaHash);
+  if (!ok) return false;
+  spdlog::info("attach: okx_ob={} okx_tr={} bn_ob={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_depth);
   return true;
 }
 
