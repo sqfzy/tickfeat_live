@@ -16,20 +16,22 @@ BN  DepthBoard(取 L0 mid)┘
 ```
 
 ## 依赖
-- **gconf 段契约**:`gconf/`(**vendored**,jt_dev3 权威版)。含 `DepthBoard`/`TradeRing`/`BookTickBoard`
-  等行情段,以及本项目的输出段 **`factor_board.h`(`gconf::shm::v2::FactorBoard`)** 与段名 `shm_names.h::F0F9_FACTOR = /shm_f0f9_v2`。
+- **gconf 段契约**:`gconf/`(**git submodule** → `hft-infra/gconf` @ jt_dev3)。含 `DepthBoard`/`TradeRing`/
+  `BookTickBoard` 等行情段,以及本项目的输出段 **`factor_board.h`(`gconf::shm::v2::FactorBoard`)** 与段名
+  `shm_names.h::TICKFEAT_FACTOR = /shm_tickfeat`。首次 clone 后 `git submodule update --init`。
 - **tick_feat 引擎**(外部,非 vendored):`../cpp/src`(`tick_feat.hpp` + `live/streaming_engine.hpp` + `event.hpp`)。
 - **Quill**:高性能异步日志(header-only;监控走日志,见 `log.h`)。引擎 `tick_feat.hpp` 仍链 spdlog。
 
-> `../cpp/` 需以同级目录存在。gconf 已收进仓库(`gconf/include`),仓库自洽。
+> `../cpp/` 需以同级目录存在。gconf 走 submodule(`gconf/include`),与生产者共用同一份权威契约。
 
 ## 构建 / 运行
 ```bash
+git submodule update --init      # 拉 gconf submodule
 xmake build                      # tickfeat_live + tickfeat_dump
 ./tickfeat_live <okx_depth> <okx_trade> <bn_depth> <out_seg> [cpu] [poll_us]
 ./tickfeat_dump <out_seg> <lid>  # 参照消费者:读回某 LID 的 f0-f9 + mid + pdiff
-# 例(云机真实段 → 因子段 F0F9_FACTOR):
-./tickfeat_live /shm_okx_swap_depth_v2 /shm_okx_swap_trade_v2 /shm_bn_swap_depth_v2 /shm_f0f9_v2 15 200
+# 例(云机真实段 → 因子段 TICKFEAT_FACTOR):
+./tickfeat_live /shm_okx_swap_depth_v2 /shm_okx_swap_trade_v2 /shm_bn_swap_depth_v2 /shm_tickfeat 15 200
 ```
 
 ## 结构(POD + 自由函数 + 函数即目录)

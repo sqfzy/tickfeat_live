@@ -1,0 +1,4 @@
+[submodule "gconf"]
+	path = gconf
+	url = git@172.18.127.104:hft-infra/gconf.git
+	branch = jt_dev3
