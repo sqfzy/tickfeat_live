@@ -53,10 +53,13 @@ inline FeedState make_feed_state() {
 // —— 收集(各源一件事)——
 
 // BN 多档 book 轮询去重 → BnMidEvent(取 L0)。
+// 不过滤空盘口(bid0/ask0=0):离线参照与 replay_feed 均把空盘口当 mid=0 喂入,引擎 bn_m>0 守卫
+// 使该秒基差作废(pdiff=0)。若在此过滤,会沿用上一有效 mid 算出非 0 基差 → 与参照差 ~1e-2 的 f8/f9。
+// update_id!=bn_uid 已挡住未写过的槽(uid=0),故空但"真实"的快照仍如实喂入。
 inline void collect_bn(const Inputs& in, FeedState& st) {
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     v2::DepthBoardSlot s;
-    if (in.bn_ob->slot[lid].read(s) && s.update_id != st.bn_uid[lid] && s.bid_px[0] && s.ask_px[0]) {
+    if (in.bn_ob->slot[lid].read(s) && s.update_id != st.bn_uid[lid]) {
       st.bn_uid[lid] = s.update_id;
       const std::int64_t ts = ns_to_us(s.exch_ns);
       st.batch[lid].push_back(Pending{ts, 1, 2, {}, {},
@@ -77,6 +80,9 @@ inline void collect_trades(const Inputs& in, FeedState& st) {
 }
 
 // 从多档槽造 ObEvent(前 5 档)。
+// OB 量喂【原始币量】(amount_real),不 ×1e8:离线 formatted 的 size 列就是原始小数(如 33.7),
+// 引擎 imb 里对 size 统一 /PX_SCALE(与 python 参照 line72 同口径)。若这里 ×1e8,size 尺度比离线大 1e8,
+// imb=(bid-ask)/(bid+ask) 虽尺度无关但浮点舍入差 1 ULP → f0/f1 残差 ~3e-16。喂原始量即与离线逐位一致。
 inline Pending make_ob_pending(const v2::DepthBoardSlot& s) {
   const std::int64_t ts = ns_to_us(s.exch_ns);
   tf::ObEvent ev{};
@@ -84,8 +90,8 @@ inline Pending make_ob_pending(const v2::DepthBoardSlot& s) {
   ev.bid_px0 = px_1e8(s.bid_px[0], s.price_scale);
   ev.ask_px0 = px_1e8(s.ask_px[0], s.price_scale);
   for (int l = 0; l < 5; ++l) {
-    ev.bid_sz[l] = size_1e8(s.bid_qty[l], s.qty_scale);
-    ev.ask_sz[l] = size_1e8(s.ask_qty[l], s.qty_scale);
+    ev.bid_sz[l] = amount_real(s.bid_qty[l], s.qty_scale);
+    ev.ask_sz[l] = amount_real(s.ask_qty[l], s.qty_scale);
   }
   return Pending{ts, 0, 0, ev, {}, {}};
 }
