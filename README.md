@@ -15,18 +15,21 @@ OKX TradeRing(成交)      ┼─ 轮询/drain → 换算 → per-LID StreamingF
 BN  DepthBoard(取 L0 mid)┘
 ```
 
-## 依赖(外部,非 vendored)
-- **tick_feat 引擎**:`../cpp/src`(`tick_feat.hpp` + `live/streaming_engine.hpp` + `event.hpp`)
-- **gconf 段契约**:`../mdreplay/gconf/include`(官方 `DepthBoard`/`TradeRing`/`BookTickBoard`,submodule `jt_dev3`)
-- **spdlog**:系统 pkg-config
+## 依赖
+- **gconf 段契约**:`gconf/`(**vendored**,jt_dev3 权威版)。含 `DepthBoard`/`TradeRing`/`BookTickBoard`
+  等行情段,以及本项目的输出段 **`factor_board.h`(`gconf::shm::v2::FactorBoard`)** 与段名 `shm_names.h::F0F9_FACTOR = /shm_f0f9_v2`。
+- **tick_feat 引擎**(外部,非 vendored):`../cpp/src`(`tick_feat.hpp` + `live/streaming_engine.hpp` + `event.hpp`)。
+- **Quill**:高性能异步日志(header-only;监控走日志,见 `log.h`)。引擎 `tick_feat.hpp` 仍链 spdlog。
 
-> 需上述两处以**同级目录**存在(`cpp/` 与 `mdreplay/` 是本仓的 sibling)。将来可改submodule。
+> `../cpp/` 需以同级目录存在。gconf 已收进仓库(`gconf/include`),仓库自洽。
 
 ## 构建 / 运行
 ```bash
 xmake build                      # tickfeat_live + tickfeat_dump
-./tickfeat_live <okx_depth> <okx_trade> <bn_depth> <out_seg> [cpu] [poll_us] [csv]
-./tickfeat_dump <out_seg> <lid>  # 参照消费者:读回某 LID 的 f0-f9
+./tickfeat_live <okx_depth> <okx_trade> <bn_depth> <out_seg> [cpu] [poll_us]
+./tickfeat_dump <out_seg> <lid>  # 参照消费者:读回某 LID 的 f0-f9 + mid + pdiff
+# 例(云机真实段 → 因子段 F0F9_FACTOR):
+./tickfeat_live /shm_okx_swap_depth_v2 /shm_okx_swap_trade_v2 /shm_bn_swap_depth_v2 /shm_f0f9_v2 15 200
 ```
 
 ## 结构(POD + 自由函数 + 函数即目录)
@@ -36,7 +39,8 @@ xmake build                      # tickfeat_live + tickfeat_dump
 | `convert.h` | 定点 mantissa → 引擎单位(纯函数)|
 | `shm_in.h` | `Inputs`(POD)+ attach 段 |
 | `feed.h` | `Pending`/`FeedState`(POD)+ 轮询收集 / 全局 ts 序喂 |
-| `emit.h` | 引擎结算秒 → 写 `FactorBoard` + valid_mask |
-| `factor_board.h` | 输出段(POD,复用 gconf seqlock 框架)|
-| `main.cpp` | 编排 + 循环 + 信号 + 周期观测(吞吐/每拍延迟)|
-| `dump.cpp` | 参照消费者 |
+| `emit.h` | 引擎结算秒 → 写 `FactorBoard` + valid_mask;逐秒查「每币每秒必更新」→ 漏秒 WARN |
+| `log.h` | Quill 全局 logger + 初始化(监控/观测走日志)|
+| `main.cpp` | 编排 + 循环 + 信号 + 周期观测(吞吐/每拍延迟/漏秒)|
+| `dump.cpp` | 参照消费者(读回 f0-f9 + mid + pdiff)|
+| `gconf/…/factor_board.h` | 输出段契约(已迁入 vendored gconf,`gconf::shm::v2::FactorBoard`)|

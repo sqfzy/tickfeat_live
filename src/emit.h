@@ -5,13 +5,16 @@
 #include <cstdint>
 #include <vector>
 
+#include <gconf/shm/v2/factor_board.h>
+
 #include "log.h"
 #include "tick_feat.hpp"   // tick_feat::Features
 
 #include "feed.h"          // EngineSet
-#include "factor_board.h"
 
 namespace tflive {
+
+namespace v2 = gconf::shm::v2;
 
 // per-LID 已写出的行数 + 首行 ts(算暖机 span 用)+ 上一行 ts(查每秒必更新)。
 struct EmitState {
@@ -42,20 +45,20 @@ inline std::uint16_t valid_mask_of(std::int64_t span_s) {
 }
 
 // 写该 LID 的最新一行到段(µs→ns)。pdiff 为该行瞬时基差(NaN=无 bn as-of),finite 则置 valid bit11。
-inline void write_latest(FactorBoard* out, int lid, const tick_feat::Features& fe,
+inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Features& fe,
                          double pdiff, std::int64_t first_ts) {
   const std::size_t i = fe.rows() - 1;
   const std::int64_t span_s = (fe.ts_us[i] - first_ts) / 1'000'000;
   std::uint16_t mask = valid_mask_of(span_s);
   if (std::isfinite(pdiff)) mask |= (1u << 11);   // pdiff→bit11
-  const double f10[kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
-                                   fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
-  factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
-               mask, f10, fe.mid_price[i], pdiff);
+  const double f10[v2::kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
+                                       fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
+  v2::factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
+                   mask, f10, fe.mid_price[i], pdiff);
 }
 
 // 各引擎有新结算秒 → 写段;逐新秒查「每币每秒必更新」,相邻秒差 !=1s 即漏秒(WARN)。返回本拍写出行数。
-inline std::size_t emit_settled(EngineSet& eng, FactorBoard* out, EmitState& es) {
+inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState& es) {
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();

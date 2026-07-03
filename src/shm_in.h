@@ -17,8 +17,8 @@
 #include <gconf/shm/v2/depth_board.h>
 #include <gconf/shm/v2/trade.h>
 
+#include <gconf/shm/v2/factor_board.h>
 #include "config.h"
-#include "factor_board.h"
 
 namespace tflive {
 
@@ -85,11 +85,11 @@ struct Inputs {
 }
 
 // 建输出 FactorBoard 段(create,清零 + 写段头)。失败返 nullptr。
-[[nodiscard]] inline FactorBoard* create_output(const HostConfig& cfg) {
+[[nodiscard]] inline v2::FactorBoard* create_output(const HostConfig& cfg) {
   ::shm_unlink(cfg.out_seg.c_str());
-  FactorBoard* out = map_segment<FactorBoard>(cfg.out_seg.c_str(), true);
+  v2::FactorBoard* out = map_segment<v2::FactorBoard>(cfg.out_seg.c_str(), true);
   if (!out) return nullptr;
-  v2::seg_init(out->hdr, v2::SegKind::Board, sizeof(FactorSlot), gconf::sym::N_SYMS, kFactorSchemaHash, 0);
+  v2::seg_init(out->hdr, v2::SegKind::Board, sizeof(v2::FactorSlot), gconf::sym::N_SYMS, v2::kFactorBoardSchemaHash, 0);
   LOG_INFO(g_log, "output: {} (FactorBoard, {} 槽)", cfg.out_seg, static_cast<int>(gconf::sym::N_SYMS));
   return out;
 }

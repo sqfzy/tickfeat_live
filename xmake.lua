@@ -9,7 +9,7 @@ add_requires("quill")
 add_cxxflags("-ffp-contract=off")
 
 local ENGINE = {"../cpp/src", "../cpp/src/live"}
-local GCONF  = "../mdreplay/gconf/include"
+local GCONF  = "gconf/include"   -- vendored gconf(jt_dev3, 含 factor_board.h + 段名 shm_names.h)
 
 target("tickfeat_live")
     set_kind("binary")

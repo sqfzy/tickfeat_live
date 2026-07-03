@@ -65,7 +65,7 @@ void log_summary(const tflive::FeedState& fst, const tflive::EmitState& est) {
 }
 
 void run_replay(const tflive::HostConfig& cfg, tflive::Inputs& in,
-                tflive::EngineSet& eng, tflive::FactorBoard* out) {
+                tflive::EngineSet& eng, gconf::shm::v2::FactorBoard* out) {
   tflive::FeedState fst = tflive::make_feed_state();
   tflive::EmitState est = tflive::make_emit_state();
 
@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
 
   tflive::Inputs in;
   if (!tflive::attach_inputs(cfg, in)) return 1;
-  tflive::FactorBoard* out = tflive::create_output(cfg);
+  gconf::shm::v2::FactorBoard* out = tflive::create_output(cfg);
   if (!out) return 1;
 
   tflive::EngineSet eng = tflive::make_engines();
