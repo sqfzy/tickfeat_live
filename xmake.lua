@@ -4,8 +4,8 @@ set_project("tickfeat_live")
 set_languages("c++23")
 add_rules("mode.release", "mode.debug")
 
--- spdlog 走系统(与 mdreplay/cpp 一致);float 收缩关闭以求可复现(同 tick_feat 引擎口径)。
-add_requires("spdlog", {system = true})
+-- Quill(高性能异步日志,header-only);float 收缩关闭以求可复现(同 tick_feat 引擎口径)。
+add_requires("quill")
 add_cxxflags("-ffp-contract=off")
 
 local ENGINE = {"../cpp/src", "../cpp/src/live"}
@@ -15,7 +15,7 @@ target("tickfeat_live")
     set_kind("binary")
     add_files("src/main.cpp")
     add_includedirs("src", ENGINE[1], ENGINE[2], GCONF)
-    add_packages("spdlog")
+    add_packages("quill")
     add_syslinks("rt", "pthread")
 
 target("tickfeat_dump")  -- 参照消费者(另进程读回验证)

@@ -3,10 +3,9 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <vector>
 
-#include <spdlog/spdlog.h>
+#include "log.h"
 #include "tick_feat.hpp"   // tick_feat::Features
 
 #include "feed.h"          // EngineSet
@@ -14,16 +13,19 @@
 
 namespace tflive {
 
-// per-LID 已写出的行数 + 首行 ts(算暖机 span 用)。
+// per-LID 已写出的行数 + 首行 ts(算暖机 span 用)+ 上一行 ts(查每秒必更新)。
 struct EmitState {
   std::vector<std::size_t>  last_rows;
   std::vector<std::int64_t> first_row_ts;
+  std::vector<std::int64_t> last_emit_ts;   // 每 LID 上一行的秒(µs);相邻 !=1s → 漏秒
+  std::uint64_t             gap_events = 0;  // 漏秒事件累计(监控:某币未每秒更新)
 };
 
 inline EmitState make_emit_state() {
   EmitState s;
   s.last_rows.assign(gconf::sym::N_SYMS, 0);
   s.first_row_ts.assign(gconf::sym::N_SYMS, 0);
+  s.last_emit_ts.assign(gconf::sym::N_SYMS, 0);
   return s;
 }
 
@@ -52,17 +54,8 @@ inline void write_latest(FactorBoard* out, int lid, const tick_feat::Features& f
                mask, f10, fe.mid_price[i], pdiff);
 }
 
-// 逐行落 CSV(对拍/复现)。pd 与 fe 逐行对齐(瞬时 pdiff 旁路)。
-inline void write_csv_rows(std::FILE* csv, int lid, const tick_feat::Features& fe,
-                           const std::vector<double>& pd, std::size_t from, std::size_t to) {
-  for (std::size_t k = from; k < to; ++k)
-    std::fprintf(csv, "%d,%lld,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g,%.10g\n",
-                 lid, static_cast<long long>(fe.ts_us[k]), fe.f0[k], fe.f1[k], fe.f2[k], fe.f3[k],
-                 fe.f4[k], fe.f5[k], fe.f6[k], fe.f7[k], fe.f8[k], fe.f9[k], fe.mid_price[k], pd[k]);
-}
-
-// 各引擎有新结算秒 → 写段(+ CSV);返回本拍写出行数。
-inline std::size_t emit_settled(EngineSet& eng, FactorBoard* out, EmitState& es, std::FILE* csv) {
+// 各引擎有新结算秒 → 写段;逐新秒查「每币每秒必更新」,相邻秒差 !=1s 即漏秒(WARN)。返回本拍写出行数。
+inline std::size_t emit_settled(EngineSet& eng, FactorBoard* out, EmitState& es) {
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();
@@ -71,9 +64,19 @@ inline std::size_t emit_settled(EngineSet& eng, FactorBoard* out, EmitState& es,
     if (r <= es.last_rows[lid]) continue;
     if (es.last_rows[lid] == 0) {
       es.first_row_ts[lid] = fe.ts_us.front();
-      spdlog::debug("首因子 lid={} ts_us={}", lid, fe.ts_us.front());
+      LOG_DEBUG(g_log, "首因子 lid={} ts_us={}", lid, fe.ts_us.front());
     }
-    if (csv) write_csv_rows(csv, lid, fe, pd, es.last_rows[lid], r);
+    for (std::size_t k = es.last_rows[lid]; k < r; ++k) {   // 监控:每币每秒 10 因子必更新一次
+      if (es.last_emit_ts[lid] != 0) {
+        const std::int64_t d = fe.ts_us[k] - es.last_emit_ts[lid];
+        if (d != 1'000'000) {
+          ++es.gap_events;
+          LOG_WARNING(g_log, "漏秒 lid={} {}→{}(缺{}秒, 该币未每秒更新)",
+                      lid, es.last_emit_ts[lid], fe.ts_us[k], d / 1'000'000 - 1);
+        }
+      }
+      es.last_emit_ts[lid] = fe.ts_us[k];
+    }
     emitted += r - es.last_rows[lid];
     es.last_rows[lid] = r;
     write_latest(out, lid, fe, pd[r - 1], es.first_row_ts[lid]);

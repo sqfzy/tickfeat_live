@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <spdlog/spdlog.h>
+#include "log.h"
 #include <gconf/shm/v2/depth_board.h>
 #include <gconf/shm/v2/trade.h>
 
@@ -29,14 +29,14 @@ template <class Board>
 [[nodiscard]] Board* map_segment(const char* name, bool create) {
   const int flags = create ? (O_CREAT | O_RDWR | O_TRUNC) : O_RDONLY;
   const int fd = ::shm_open(name, flags, 0660);
-  if (fd < 0) { spdlog::error("shm_open {} 失败: {}", name, std::strerror(errno)); return nullptr; }
+  if (fd < 0) { LOG_ERROR(g_log, "shm_open {} 失败: {}", name, std::strerror(errno)); return nullptr; }
   if (create && ::ftruncate(fd, static_cast<off_t>(sizeof(Board))) != 0) {
-    spdlog::error("ftruncate {} 失败", name); ::close(fd); return nullptr;
+    LOG_ERROR(g_log, "ftruncate {} 失败", name); ::close(fd); return nullptr;
   }
   const int prot = create ? (PROT_READ | PROT_WRITE) : PROT_READ;
   void* base = ::mmap(nullptr, sizeof(Board), prot, MAP_SHARED, fd, 0);
   ::close(fd);
-  if (base == MAP_FAILED) { spdlog::error("mmap {} 失败", name); return nullptr; }
+  if (base == MAP_FAILED) { LOG_ERROR(g_log, "mmap {} 失败", name); return nullptr; }
   return reinterpret_cast<Board*>(base);
 }
 
@@ -56,13 +56,13 @@ struct Inputs {
   const v2::SegError e = v2::seg_check(hdr, kind, entry_size, capacity, schema_hash);
   if (e == v2::SegError::Ok) return true;
   if (e == v2::SegError::SchemaDrift) {
-    spdlog::warn("段 {} schema 漂移: {}(本端 hash={:#x}, 段内 hash={:#x})—— 演进期容忍, 继续但因子可能偏",
-                 name, v2::seg_error_str(e), schema_hash, hdr.schema_hash);
+    LOG_WARNING(g_log, "段 {} schema 漂移: {}(本端 hash={:#x}, 段内 hash={:#x})—— 演进期容忍, 继续但因子可能偏",
+                name, v2::seg_error_str(e), schema_hash, hdr.schema_hash);
     return true;
   }
-  spdlog::error("段 {} 契约不符: {}(kind 期望={} 段内={}; entry_size 期望={} 段内={}; capacity 期望={} 段内={})",
-                name, v2::seg_error_str(e), static_cast<int>(kind), static_cast<int>(hdr.kind),
-                entry_size, hdr.entry_size, capacity, hdr.capacity);
+  LOG_ERROR(g_log, "段 {} 契约不符: {}(kind 期望={} 段内={}; entry_size 期望={} 段内={}; capacity 期望={} 段内={})",
+            name, v2::seg_error_str(e), static_cast<int>(kind), static_cast<int>(hdr.kind),
+            entry_size, hdr.entry_size, capacity, hdr.capacity);
   return false;
 }
 
@@ -80,7 +80,7 @@ struct Inputs {
       check_segment(cfg.bn_depth.c_str(), in.bn_ob->hdr, v2::SegKind::Board,
                     sizeof(v2::DepthBoardSlot), gconf::sym::N_SYMS, v2::kDepthBoardSchemaHash);
   if (!ok) return false;
-  spdlog::info("attach: okx_ob={} okx_tr={} bn_ob={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_depth);
+  LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} bn_ob={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_depth);
   return true;
 }
 
@@ -90,7 +90,7 @@ struct Inputs {
   FactorBoard* out = map_segment<FactorBoard>(cfg.out_seg.c_str(), true);
   if (!out) return nullptr;
   v2::seg_init(out->hdr, v2::SegKind::Board, sizeof(FactorSlot), gconf::sym::N_SYMS, kFactorSchemaHash, 0);
-  spdlog::info("output: {} (FactorBoard, {} 槽)", cfg.out_seg, static_cast<int>(gconf::sym::N_SYMS));
+  LOG_INFO(g_log, "output: {} (FactorBoard, {} 槽)", cfg.out_seg, static_cast<int>(gconf::sym::N_SYMS));
   return out;
 }
 
