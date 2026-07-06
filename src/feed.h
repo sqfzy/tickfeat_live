@@ -53,17 +53,17 @@ inline FeedState make_feed_state() {
 // —— 收集(各源一件事)——
 
 // BN 多档 book 轮询去重 → BnMidEvent(取 L0)。
-// 不过滤空盘口(bid0/ask0=0):离线参照与 replay_feed 均把空盘口当 mid=0 喂入,引擎 bn_m>0 守卫
-// 使该秒基差作废(pdiff=0)。若在此过滤,会沿用上一有效 mid 算出非 0 基差 → 与参照差 ~1e-2 的 f8/f9。
-// update_id!=bn_uid 已挡住未写过的槽(uid=0),故空但"真实"的快照仍如实喂入。
+// BN bookTicker 轮询去重 → BnMidEvent(单档 BBO 的 mid)。
+// 不过滤(极端单边 bid/ask=0):与离线口径一致,引擎 bn_m>0 守卫使该秒基差作废(pdiff=0)。
+// update_id!=bn_uid 已挡住未写过的槽(uid=0)。
 inline void collect_bn(const Inputs& in, FeedState& st) {
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
-    v2::DepthBoardSlot s;
-    if (in.bn_ob->slot[lid].read(s) && s.update_id != st.bn_uid[lid]) {
+    v2::BookTickBoardSlot s;
+    if (in.bn_bt->slot[lid].read(s) && s.update_id != st.bn_uid[lid]) {
       st.bn_uid[lid] = s.update_id;
       const std::int64_t ts = ns_to_us(s.exch_ns);
       st.batch[lid].push_back(Pending{ts, 1, 2, {}, {},
-          tf::BnMidEvent{ts, px_1e8(s.bid_px[0], s.price_scale), px_1e8(s.ask_px[0], s.price_scale)}});
+          tf::BnMidEvent{ts, px_1e8(s.bid_px, s.price_scale), px_1e8(s.ask_px, s.price_scale), s.update_id}});
     }
   }
 }
@@ -75,7 +75,7 @@ inline void collect_trades(const Inputs& in, FeedState& st) {
     if (lid < 0 || lid >= gconf::sym::N_SYMS) return;
     const std::int64_t ts = ns_to_us(p.exch_ns);
     st.batch[lid].push_back(Pending{ts, 0, 1, {},
-        tf::TradeEvent{ts, p.side, px_1e8(p.px, p.price_scale), amount_real(p.qty, p.qty_scale)}, {}});
+        tf::TradeEvent{ts, p.side, px_1e8(p.px, p.price_scale), amount_real(p.qty, p.qty_scale), p.exch_ns}, {}});
   });
 }
 
@@ -93,6 +93,7 @@ inline Pending make_ob_pending(const v2::DepthBoardSlot& s) {
     ev.bid_sz[l] = amount_real(s.bid_qty[l], s.qty_scale);
     ev.ask_sz[l] = amount_real(s.ask_qty[l], s.qty_scale);
   }
+  ev.update_id = s.update_id;   // 源血缘键(透传)
   return Pending{ts, 0, 0, ev, {}, {}};
 }
 

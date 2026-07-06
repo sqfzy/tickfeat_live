@@ -57,12 +57,24 @@ inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Feature
                    mask, f10, fe.mid_price[i], pdiff);
 }
 
+// 落一条结算行到 dump CSV(全精度 round-trip double)。ts_us 原生 µs(不经 ns 往返)。
+// 逐条落(非 latest-wins 段快照)→ 引擎产的每一行都在,不受轮询采样漏秒影响。
+inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe, double pdiff,
+                     const tf::StreamingFeatureEngine::SrcSpan& sp, std::size_t k) {
+  LOG_INFO(dump, "{},{},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},"
+                 "{},{},{},{},{},{}",
+           lid, fe.ts_us[k], fe.f0[k], fe.f1[k], fe.f2[k], fe.f3[k], fe.f4[k],
+           fe.f5[k], fe.f6[k], fe.f7[k], fe.f8[k], fe.f9[k], fe.mid_price[k], pdiff,
+           sp.ob_lo, sp.ob_hi, sp.bn_lo, sp.bn_hi, sp.tr_lo, sp.tr_hi);
+}
+
 // 各引擎有新结算秒 → 写段;逐新秒查「每币每秒必更新」,相邻秒差 !=1s 即漏秒(WARN)。返回本拍写出行数。
 inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState& es) {
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();
     const auto& pd = eng[lid].pdiff_series();   // 瞬时 pdiff 旁路, 与 fe 逐行对齐
+    const auto& sp = eng[lid].src_series();     // 源血缘旁路, 与 fe 逐行对齐
     const std::size_t r = fe.rows();
     if (r <= es.last_rows[lid]) continue;
     if (es.last_rows[lid] == 0) {
@@ -78,6 +90,7 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
                       lid, es.last_emit_ts[lid], fe.ts_us[k], d / 1'000'000 - 1);
         }
       }
+      if (g_dump) dump_row(g_dump, lid, fe, pd[k], sp[k], k);   // 逐条落盘(对拍;不漏秒)+ 源血缘
       es.last_emit_ts[lid] = fe.ts_us[k];
     }
     emitted += r - es.last_rows[lid];

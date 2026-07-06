@@ -96,8 +96,13 @@ int main(int argc, char** argv) {
   if (!tflive::attach_inputs(cfg, in)) return 1;
   gconf::shm::v2::FactorBoard* out = tflive::create_output(cfg);
   if (!out) return 1;
+  if (!cfg.dump.empty()) {
+    tflive::init_dump_logger(cfg.dump);
+    LOG_INFO(tflive::g_log, "落盘开启:每条结算行 → {}", cfg.dump);
+  }
 
   tflive::EngineSet eng = tflive::make_engines();
   run_replay(cfg, in, eng, out);
+  if (tflive::g_dump) tflive::g_dump->flush_log();   // 阻塞至所有落盘行刷入文件(Quill 异步,退出前必刷)
   return 0;
 }

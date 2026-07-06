@@ -4,3 +4,4 @@ build/
 tickfeat_live
 tickfeat_dump
 *.csv
+test/.work/

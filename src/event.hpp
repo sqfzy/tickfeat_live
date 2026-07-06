@@ -13,24 +13,30 @@
 namespace tick_feat::live {
 
 // OB 快照: 价 ×1e8 原始 int64; 前5档量真实值(引擎内 /PX_SCALE, 同离线 extract_ob_snapshots)
+// update_id: 交易所盘口更新序号(惰性透传, 供源血缘; 不参与任何数值计算)
 struct ObEvent {
-    int64_t              ts;
-    int64_t              bid_px0, ask_px0;
+    int64_t               ts;
+    int64_t               bid_px0, ask_px0;
     std::array<double, 5> bid_sz, ask_sz;
+    uint64_t              update_id{0};
 };
 
 // 成交: price ×1e8 原始; amount 真实币量; sign 由 side(0=主动买/1=主动卖)
+// exch_ns: 交易所成交时戳(原始 ns, 惰性透传作源血缘键; ts 仍作分桶用)
 struct TradeEvent {
     int64_t ts;
     int64_t side;
     int64_t price_scaled;
     double  amount;
+    int64_t exch_ns{0};
 };
 
 // BN 行情(只取桶末 mid): 价 ×1e8 原始, 引擎按离线同表达式算 mid
+// update_id: BookTick 盘口更新序号(惰性透传, 供源血缘)
 struct BnMidEvent {
-    int64_t ts;
-    int64_t bid_px0, ask_px0;
+    int64_t  ts;
+    int64_t  bid_px0, ask_px0;
+    uint64_t update_id{0};
 };
 
 } // namespace tick_feat::live
