@@ -75,7 +75,8 @@ inline void collect_trades(const Inputs& in, FeedState& st) {
     if (lid < 0 || lid >= gconf::sym::N_SYMS) return;
     const std::int64_t ts = ns_to_us(p.exch_ns);
     st.batch[lid].push_back(Pending{ts, 0, 1, {},
-        tf::TradeEvent{ts, p.side, px_1e8(p.px, p.price_scale), amount_real(p.qty, p.qty_scale), p.exch_ns}, {}});
+        tf::TradeEvent{ts, p.side, px_1e8(p.px, p.price_scale), amount_real(p.qty, p.qty_scale),
+                       p.exch_ns, p.trade_id}, {}});
   });
 }
 

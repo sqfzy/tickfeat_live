@@ -41,7 +41,9 @@ public:
         const double sign = (ev.side == 0) ? 1.0 : -1.0;
         kahan_add(sv_, sv_comp_, sign * usd);
         kahan_add(av_, av_comp_, usd);
-        span_min_max(tr_ns_lo_, tr_ns_hi_, ev.exch_ns); have_trade_this_sec_ = true;  // 血缘
+        span_min_max(tr_ns_lo_, tr_ns_hi_, ev.exch_ns);                              // 血缘:exch_ns 区间
+        span_min_max(tr_id_lo_, tr_id_hi_, static_cast<std::int64_t>(ev.trade_id));  // 血缘:trade_id 区间
+        have_trade_this_sec_ = true;
     }
 
     void feed_bn_mid(const BnMidEvent& ev) {
@@ -63,7 +65,7 @@ public:
 
     // 源血缘旁路(与 out_ 逐行对齐):每行=该秒消费的 OB update_id / BN update_id / trade exch_ns 各 [lo,hi]。
     // 段内单调 → 区间无损标识源数据;该段该秒无数据 = {-1,-1}。惰性透传, 不进 Features 那 11 列。
-    struct SrcSpan { std::int64_t ob_lo, ob_hi, bn_lo, bn_hi, tr_lo, tr_hi; };
+    struct SrcSpan { std::int64_t ob_lo, ob_hi, bn_lo, bn_hi, tr_ns_lo, tr_ns_hi, tr_id_lo, tr_id_hi; };
     const std::vector<SrcSpan>& src_series() const { return src_; }
 
 private:
@@ -86,8 +88,8 @@ private:
         if (v > hi) hi = v;
     }
     void reset_src_span() {
-        ob_uid_lo_ = bn_uid_lo_ = tr_ns_lo_ = std::numeric_limits<std::int64_t>::max();
-        ob_uid_hi_ = bn_uid_hi_ = tr_ns_hi_ = std::numeric_limits<std::int64_t>::min();
+        ob_uid_lo_ = bn_uid_lo_ = tr_ns_lo_ = tr_id_lo_ = std::numeric_limits<std::int64_t>::max();
+        ob_uid_hi_ = bn_uid_hi_ = tr_ns_hi_ = tr_id_hi_ = std::numeric_limits<std::int64_t>::min();
         have_trade_this_sec_ = false;
     }
 
@@ -145,7 +147,8 @@ private:
         src_.push_back(SrcSpan{
             ob_uid_lo_, ob_uid_hi_,
             bn_has_mid_this_sec_  ? bn_uid_lo_ : -1, bn_has_mid_this_sec_  ? bn_uid_hi_ : -1,
-            have_trade_this_sec_  ? tr_ns_lo_  : -1, have_trade_this_sec_  ? tr_ns_hi_  : -1});
+            have_trade_this_sec_  ? tr_ns_lo_  : -1, have_trade_this_sec_  ? tr_ns_hi_  : -1,
+            have_trade_this_sec_  ? tr_id_lo_  : -1, have_trade_this_sec_  ? tr_id_hi_  : -1});
 
         prev_mid_ = mid; have_prev_mid_ = true;
 
@@ -213,6 +216,7 @@ private:
     std::int64_t ob_uid_lo_ = 0, ob_uid_hi_ = -1;   // OKX OB update_id
     std::int64_t bn_uid_lo_ = 0, bn_uid_hi_ = -1;   // BN BookTick update_id
     std::int64_t tr_ns_lo_  = 0, tr_ns_hi_  = -1;   // trade exch_ns
+    std::int64_t tr_id_lo_  = 0, tr_id_hi_  = -1;   // trade 交易所 trade_id
     bool have_trade_this_sec_ = false;
     std::vector<SrcSpan> src_;    // 与 out_ 逐行对齐
 

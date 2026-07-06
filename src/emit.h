@@ -62,10 +62,10 @@ inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Feature
 inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe, double pdiff,
                      const tf::StreamingFeatureEngine::SrcSpan& sp, std::size_t k) {
   LOG_INFO(dump, "{},{},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},{:.17g},"
-                 "{},{},{},{},{},{}",
+                 "{},{},{},{},{},{},{},{}",
            lid, fe.ts_us[k], fe.f0[k], fe.f1[k], fe.f2[k], fe.f3[k], fe.f4[k],
            fe.f5[k], fe.f6[k], fe.f7[k], fe.f8[k], fe.f9[k], fe.mid_price[k], pdiff,
-           sp.ob_lo, sp.ob_hi, sp.bn_lo, sp.bn_hi, sp.tr_lo, sp.tr_hi);
+           sp.ob_lo, sp.ob_hi, sp.bn_lo, sp.bn_hi, sp.tr_ns_lo, sp.tr_ns_hi, sp.tr_id_lo, sp.tr_id_hi);
 }
 
 // 各引擎有新结算秒 → 写段;逐新秒查「每币每秒必更新」,相邻秒差 !=1s 即漏秒(WARN)。返回本拍写出行数。

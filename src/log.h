@@ -36,7 +36,7 @@ inline void init_dump_logger(const std::string& path) {
   g_dump = quill::Frontend::create_or_get_logger("dump", std::move(sink),
                                                  quill::PatternFormatterOptions{"%(message)"});
   LOG_INFO(g_dump, "lid,ts_us,f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,mid,pdiff,"
-                   "ob_uid_lo,ob_uid_hi,bn_uid_lo,bn_uid_hi,tr_ns_lo,tr_ns_hi");
+                   "ob_uid_lo,ob_uid_hi,bn_uid_lo,bn_uid_hi,tr_ns_lo,tr_ns_hi,tr_id_lo,tr_id_hi");
 }
 
 }  // namespace tflive

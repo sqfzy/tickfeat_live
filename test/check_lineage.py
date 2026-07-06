@@ -9,7 +9,7 @@ DUMP, OKX, BN = sys.argv[1], sys.argv[2], sys.argv[3]
 GID = ["AAVEUSDT","ADAUSDT","APTUSDT","ARBUSDT","AVAXUSDT","AXSUSDT","BCHUSDT","BNBUSDT","CRVUSDT",
        "DOGEUSDT","DOTUSDT","ENSUSDT","HBARUSDT","LTCUSDT","OPUSDT","ORDIUSDT","PEOPLEUSDT","PNUTUSDT",
        "SANDUSDT","SOLUSDT","SUIUSDT","TIAUSDT","TRUMPUSDT","UNIUSDT","WLDUSDT","XLMUSDT","XRPUSDT"]
-LNS = ["ob_uid_lo","ob_uid_hi","bn_uid_lo","bn_uid_hi","tr_ns_lo","tr_ns_hi"]
+LNS = ["ob_uid_lo","ob_uid_hi","bn_uid_lo","bn_uid_hi","tr_ns_lo","tr_ns_hi","tr_id_lo","tr_id_hi"]
 
 d = pd.read_csv(DUMP, dtype={c: "int64" for c in LNS + ["lid", "ts_us"]})  # 强制 int64,避免大 ns 落 float
 
@@ -25,8 +25,10 @@ for lid in sorted(d.lid.unique()):
         o, b, t = ob[ob.buck == q], bn[bn.buck == q], tr[tr.buck == q]
         exp = ((int(o.update_id.min()), int(o.update_id.max())) if len(o) else (-1, -1)) \
             + ((int(b.update_id.min()), int(b.update_id.max())) if len(b) else (-1, -1)) \
-            + ((int(t.ts.min()), int(t.ts.max())) if len(t) else (-1, -1))
-        got = (int(r.ob_uid_lo), int(r.ob_uid_hi), int(r.bn_uid_lo), int(r.bn_uid_hi), int(r.tr_ns_lo), int(r.tr_ns_hi))
+            + ((int(t.ts.min()), int(t.ts.max())) if len(t) else (-1, -1)) \
+            + ((int(t.trade_id.min()), int(t.trade_id.max())) if len(t) else (-1, -1))
+        got = (int(r.ob_uid_lo), int(r.ob_uid_hi), int(r.bn_uid_lo), int(r.bn_uid_hi),
+               int(r.tr_ns_lo), int(r.tr_ns_hi), int(r.tr_id_lo), int(r.tr_id_hi))
         if got != exp:
             mism += 1
             if mism <= 8: print(f"  ✗ {sym} ts={q}\n     got={got}\n     exp={exp}")
