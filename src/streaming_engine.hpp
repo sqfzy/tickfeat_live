@@ -31,7 +31,7 @@ public:
         latest_ob_ = ev; have_latest_ob_ = true;
         bucket_last_mid_ = ob_mid_scaled(ev.bid_px0, ev.ask_px0);
         has_ob_this_sec_ = true;
-        span_min_max(ob_uid_lo_, ob_uid_hi_, static_cast<std::int64_t>(ev.update_id));  // 血缘
+        ob_cur_.push_back(ev);   // 源 raw:留存本秒消费的 OB 约简事件(喂回引擎即复现)
         if (ev.ts == cur_sec_) { boundary_ob_ = ev; have_boundary_ob_ = true; }  // ts≤秒起点 含 ts==秒起点
     }
 
@@ -41,16 +41,14 @@ public:
         const double sign = (ev.side == 0) ? 1.0 : -1.0;
         kahan_add(sv_, sv_comp_, sign * usd);
         kahan_add(av_, av_comp_, usd);
-        span_min_max(tr_ns_lo_, tr_ns_hi_, ev.exch_ns);                              // 血缘:exch_ns 区间
-        span_min_max(tr_id_lo_, tr_id_hi_, static_cast<std::int64_t>(ev.trade_id));  // 血缘:trade_id 区间
-        have_trade_this_sec_ = true;
+        tr_cur_.push_back(ev);   // 源 raw:留存本秒成交事件
     }
 
     void feed_bn_mid(const BnMidEvent& ev) {
         advance_to(ev.ts);
         bn_bucket_last_mid_  = ob_mid_scaled(ev.bid_px0, ev.ask_px0);
         bn_has_mid_this_sec_ = true;
-        span_min_max(bn_uid_lo_, bn_uid_hi_, static_cast<std::int64_t>(ev.update_id));  // 血缘
+        bn_cur_.push_back(ev);   // 源 raw:留存本秒 BN 事件
     }
 
     void finish() {                                  // 结算最后未闭合的秒
@@ -63,10 +61,10 @@ public:
     // 不改 f0-f9+mid 这 11 列参照 —— 离线 bit-exact 对拍只比那 11 列, 不受影响。
     const std::vector<double>& pdiff_series() const { return pdiff_; }
 
-    // 源血缘旁路(与 out_ 逐行对齐):每行=该秒消费的 OB update_id / BN update_id / trade exch_ns 各 [lo,hi]。
-    // 段内单调 → 区间无损标识源数据;该段该秒无数据 = {-1,-1}。惰性透传, 不进 Features 那 11 列。
-    struct SrcSpan { std::int64_t ob_lo, ob_hi, bn_lo, bn_hi, tr_ns_lo, tr_ns_hi, tr_id_lo, tr_id_hi; };
-    const std::vector<SrcSpan>& src_series() const { return src_; }
+    // 源 raw 旁路(与 out_ 逐行对齐):每行=该秒引擎实际消费的原始事件(OB 约简快照/成交/BN)。
+    // 逐字留存, 喂回引擎即逐位复现该行因子 —— 取代 id lo/hi 摘要。emit dump 后置空释放(非 const)。
+    struct RawBucket { std::vector<ObEvent> ob; std::vector<TradeEvent> tr; std::vector<BnMidEvent> bn; };
+    std::vector<RawBucket>& raw_series() { return raw_; }
 
 private:
     // watermark 推进: 跨秒时先结算 cur_sec(先 bn 后 okx), 再开启新秒。
@@ -87,10 +85,8 @@ private:
         if (v < lo) lo = v;
         if (v > hi) hi = v;
     }
-    void reset_src_span() {
-        ob_uid_lo_ = bn_uid_lo_ = tr_ns_lo_ = tr_id_lo_ = std::numeric_limits<std::int64_t>::max();
-        ob_uid_hi_ = bn_uid_hi_ = tr_ns_hi_ = tr_id_hi_ = std::numeric_limits<std::int64_t>::min();
-        have_trade_this_sec_ = false;
+    void reset_src_span() {   // 每秒清:丢弃未结算(无 OB 秒)的事件缓冲, 防止跨秒串入
+        ob_cur_.clear(); tr_cur_.clear(); bn_cur_.clear();
     }
 
     void settle_bn_sec() {
@@ -143,12 +139,8 @@ private:
         cs_pcnt_.push_back((cs_pcnt_.empty() ? 0.0 : cs_pcnt_.back()) + pcnt);
         pdiff_.push_back(pcnt > 0.0 ? pdiff : std::numeric_limits<double>::quiet_NaN());  // 瞬时值旁路(cs_pdiff_ 仍 +0 保 pm 不变)
 
-        // 源血缘:has_ob 恒真(已过守卫)→ ob 区间必有效;bn/trade 该秒无数据则 {-1,-1}。
-        src_.push_back(SrcSpan{
-            ob_uid_lo_, ob_uid_hi_,
-            bn_has_mid_this_sec_  ? bn_uid_lo_ : -1, bn_has_mid_this_sec_  ? bn_uid_hi_ : -1,
-            have_trade_this_sec_  ? tr_ns_lo_  : -1, have_trade_this_sec_  ? tr_ns_hi_  : -1,
-            have_trade_this_sec_  ? tr_id_lo_  : -1, have_trade_this_sec_  ? tr_id_hi_  : -1});
+        // 源 raw:留存本秒消费的原始事件(has_ob 恒真→ob 非空;bn/trade 该秒无则空)。move 走, reset 清缓冲。
+        raw_.push_back(RawBucket{std::move(ob_cur_), std::move(tr_cur_), std::move(bn_cur_)});
 
         prev_mid_ = mid; have_prev_mid_ = true;
 
@@ -212,13 +204,11 @@ private:
     std::vector<double> cs_pdiff_, cs_pcnt_;
     std::vector<double> pdiff_;   // 瞬时 pdiff 旁路(无 bn as-of=NaN); 供实时消费者读, 不进 Features
 
-    // ── 源血缘:当前秒各段 id 区间(reset_src_span 每秒清)+ 逐行历史 ──
-    std::int64_t ob_uid_lo_ = 0, ob_uid_hi_ = -1;   // OKX OB update_id
-    std::int64_t bn_uid_lo_ = 0, bn_uid_hi_ = -1;   // BN BookTick update_id
-    std::int64_t tr_ns_lo_  = 0, tr_ns_hi_  = -1;   // trade exch_ns
-    std::int64_t tr_id_lo_  = 0, tr_id_hi_  = -1;   // trade 交易所 trade_id
-    bool have_trade_this_sec_ = false;
-    std::vector<SrcSpan> src_;    // 与 out_ 逐行对齐
+    // ── 源 raw:当前秒事件缓冲(reset 每秒清 / settle move 走)+ 逐行历史(emit dump 后置空释放) ──
+    std::vector<ObEvent>    ob_cur_;
+    std::vector<TradeEvent> tr_cur_;
+    std::vector<BnMidEvent> bn_cur_;
+    std::vector<RawBucket>  raw_;    // 与 out_ 逐行对齐
 
     Features out_;
 };
