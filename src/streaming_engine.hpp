@@ -70,6 +70,10 @@ public:
     // 不改 f0-f9+mid 这 11 列参照 —— 离线 bit-exact 对拍只比那 11 列, 不受影响。
     const std::vector<double>& pdiff_series() const { return pdiff_; }
 
+    // factor_calc_v2 口径旁路(与 out_ 逐行对齐): pdiff_v2=(bn-okx)/okx×1e9(桶末); mean_v2=其 12h 均值(≥3h valid, 否则 0)。
+    const std::vector<double>& pdiff_v2_series() const { return pdiff_v2_; }
+    const std::vector<double>& mean_v2_series()  const { return mean_v2_; }
+
     // 源 raw 旁路(与 out_ 逐行对齐):每行=该秒引擎实际消费的原始事件(OB 约简快照/成交/BN)。
     // 逐字留存, 喂回引擎即逐位复现该行因子 —— 取代 id lo/hi 摘要。emit dump 后置空释放(非 const)。
     struct RawBucket { std::vector<OkxBookTickEvent> bt; std::vector<ObEvent> ob; std::vector<TradeEvent> tr; std::vector<BnMidEvent> bn; };
@@ -138,17 +142,20 @@ private:
         cs_lr2_.push_back((cs_lr2_.empty() ? 0.0 : cs_lr2_.back()) + lr * lr);
 
         // pdiff: bn 桶末 mid as-of(ts≤q 的最后 bn 秒)
-        double pdiff = 0.0, pcnt = 0.0;
+        double pdiff = 0.0, pcnt = 0.0, pdiff_v2 = 0.0;
         const std::int64_t bi = prev_index(bn_ts_, q);
         if (bi >= 0) {
             const double bn_m = bn_mid_[static_cast<std::size_t>(bi)];
             if (bn_m > 0.0 && std::isfinite(mid) && mid > 0.0) {
                 pdiff = (mid - bn_m) / bn_m * 1e4; pcnt = 1.0;
+                pdiff_v2 = (bn_m - mid) / mid * 1e9;   // factor_calc_v2 口径: (close=bn - open=okx)/open × 1e9, 桶末 mid
             }
         }
         cs_pdiff_.push_back((cs_pdiff_.empty() ? 0.0 : cs_pdiff_.back()) + pdiff);
         cs_pcnt_.push_back((cs_pcnt_.empty() ? 0.0 : cs_pcnt_.back()) + pcnt);
+        cs_pdiff_v2_.push_back((cs_pdiff_v2_.empty() ? 0.0 : cs_pdiff_v2_.back()) + pdiff_v2);
         pdiff_.push_back(pcnt > 0.0 ? pdiff : std::numeric_limits<double>::quiet_NaN());  // 瞬时值旁路(cs_pdiff_ 仍 +0 保 pm 不变)
+        pdiff_v2_.push_back(pcnt > 0.0 ? pdiff_v2 : std::numeric_limits<double>::quiet_NaN());
 
         // 源 raw:留存本秒消费的原始事件(has_ob 恒真→ob 非空;bn/trade 该秒无则空)。move 走, reset 清缓冲。
         raw_.push_back(RawBucket{std::move(bt_cur_), std::move(ob_cur_), std::move(tr_cur_), std::move(bn_cur_)});
@@ -180,6 +187,11 @@ private:
         const double pm_12h_s = rolling_sum_asof(cs_pdiff_, ts_sec_, q, 43200);
         const double pm_12h_n = rolling_sum_asof(cs_pcnt_,  ts_sec_, q, 43200);
         const double pm_12h   = (pm_12h_n > 0) ? pm_12h_s / pm_12h_n : 0.0;
+
+        // factor_calc_v2 口径 mean: pdiff_v2 的 12h 均值; 需 ≥3h(10800s)有效样本, 否则 0(同 v2 mean_min_s)
+        const double mv2_s   = rolling_sum_asof(cs_pdiff_v2_, ts_sec_, q, 43200);
+        const double mean_v2 = (pm_12h_n >= 10800.0) ? mv2_s / pm_12h_n : 0.0;
+        mean_v2_.push_back(mean_v2);
 
         out_.ts_us.push_back(q);
         out_.f0.push_back(imb1);  out_.f1.push_back(imb5);  out_.f2.push_back(spread);
@@ -218,6 +230,9 @@ private:
     // ── pdiff 历史(与 okx 网格对齐) ──
     std::vector<double> cs_pdiff_, cs_pcnt_;
     std::vector<double> pdiff_;   // 瞬时 pdiff 旁路(无 bn as-of=NaN); 供实时消费者读, 不进 Features
+    // ── factor_calc_v2 口径旁路: pdiff_v2=(bn-okx)/okx×1e9(桶末); mean_v2=其 12h 均值(≥3h valid) ──
+    std::vector<double> cs_pdiff_v2_;
+    std::vector<double> pdiff_v2_, mean_v2_;   // 与 out_ 逐行对齐; 不进 f0-f9
 
     // ── 源 raw:当前秒事件缓冲(reset 每秒清 / settle move 走)+ 逐行历史(emit dump 后置空释放) ──
     std::vector<OkxBookTickEvent> bt_cur_;

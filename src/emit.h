@@ -48,15 +48,17 @@ inline std::uint16_t valid_mask_of(std::int64_t span_s) {
 
 // 写该 LID 的最新一行到段(µs→ns)。pdiff 为该行瞬时基差(NaN=无 bn as-of),finite 则置 valid bit11。
 inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Features& fe,
-                         double pdiff, std::int64_t first_ts) {
+                         double pdiff, double pdiff_v2, double mean_v2, std::int64_t first_ts) {
   const std::size_t i = fe.rows() - 1;
   const std::int64_t span_s = (fe.ts_us[i] - first_ts) / 1'000'000;
   std::uint16_t mask = valid_mask_of(span_s);
-  if (std::isfinite(pdiff)) mask |= (1u << 11);   // pdiff→bit11
+  if (std::isfinite(pdiff)) mask |= (1u << 11);      // pdiff→bit11
+  if (std::isfinite(pdiff_v2)) mask |= (1u << 12);   // pdiff_v2→bit12
+  if (span_s >= 10800) mask |= (1u << 13);           // mean_v2→bit13(≥3h 有效样本)
   const double f10[v2::kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
                                        fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
   v2::factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
-                   mask, f10, fe.mid_price[i], pdiff);
+                   mask, f10, fe.mid_price[i], pdiff, pdiff_v2, mean_v2);
 }
 
 // 全精度 double → JSON(NaN→null 保合法 JSON;finite 用 %.17g round-trip 可逐位复现)。
@@ -69,6 +71,7 @@ inline void append_f17(std::string& s, double v) {
 // source_raw 喂回引擎(feed_okx_ob/trade/bn_mid)即逐位复现本行因子 —— 取代旧的 id lo/hi 摘要。
 // ob=[ts,bid_px0,ask_px0, bid_sz0..4, ask_sz0..4, update_id]; tr=[ts,side,price_scaled,amount,exch_ns,trade_id]; bn=[ts,bid_px0,ask_px0,update_id]。
 inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe, double pdiff,
+                     double pdiff_v2, double mean_v2,
                      const tf::StreamingFeatureEngine::RawBucket& rb, std::size_t k) {
   std::string j; j.reserve(8192);
   j += "{\"lid\":"; j += std::to_string(lid);
@@ -80,6 +83,8 @@ inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe
   j += ",\"f7\":"; append_f17(j, fe.f7[k]); j += ",\"f8\":"; append_f17(j, fe.f8[k]);
   j += ",\"f9\":"; append_f17(j, fe.f9[k]); j += ",\"mid\":"; append_f17(j, fe.mid_price[k]);
   j += ",\"pdiff\":"; append_f17(j, pdiff);
+  j += ",\"pdiff_v2\":"; append_f17(j, pdiff_v2);   // factor_calc_v2 口径基差
+  j += ",\"mean_v2\":"; append_f17(j, mean_v2);     // 其 12h 均值(≥3h valid, 否则 0)
   j += "},\"source_raw\":{\"bt\":[";
   for (std::size_t i = 0; i < rb.bt.size(); ++i) {   // OKX booktick(BBO): [ts,bid_px0,ask_px0,bid_sz0,ask_sz0,update_id]
     const auto& e = rb.bt[i];
@@ -120,7 +125,9 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();
-    const auto& pd = eng[lid].pdiff_series();   // 瞬时 pdiff 旁路, 与 fe 逐行对齐
+    const auto& pd  = eng[lid].pdiff_series();     // 瞬时 pdiff 旁路, 与 fe 逐行对齐
+    const auto& pd2 = eng[lid].pdiff_v2_series();  // factor_calc_v2 口径 pdiff, 与 fe 逐行对齐
+    const auto& mv2 = eng[lid].mean_v2_series();   // factor_calc_v2 口径 mean(12h), 与 fe 逐行对齐
     auto&       raw = eng[lid].raw_series();    // 源 raw 旁路(非 const:dump 后置空释放), 与 fe 逐行对齐
     const std::size_t r = fe.rows();
     if (r <= es.last_rows[lid]) continue;
@@ -137,13 +144,13 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
                       lid, es.last_emit_ts[lid], fe.ts_us[k], d / 1'000'000 - 1);
         }
       }
-      if (g_dump) dump_row(g_dump, lid, fe, pd[k], raw[k], k);  // 逐条落 JSONL(factors+完整 raw;不漏秒)
+      if (g_dump) dump_row(g_dump, lid, fe, pd[k], pd2[k], mv2[k], raw[k], k);  // 逐条落 JSONL(factors+完整 raw;不漏秒)
       raw[k] = tf::StreamingFeatureEngine::RawBucket{};         // dump 后释放该秒 raw, 防 raw_ 无界增长
       es.last_emit_ts[lid] = fe.ts_us[k];
     }
     emitted += r - es.last_rows[lid];
     es.last_rows[lid] = r;
-    write_latest(out, lid, fe, pd[r - 1], es.first_row_ts[lid]);
+    write_latest(out, lid, fe, pd[r - 1], pd2[r - 1], mv2[r - 1], es.first_row_ts[lid]);
   }
   return emitted;
 }
