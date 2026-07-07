@@ -80,7 +80,15 @@ inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe
   j += ",\"f7\":"; append_f17(j, fe.f7[k]); j += ",\"f8\":"; append_f17(j, fe.f8[k]);
   j += ",\"f9\":"; append_f17(j, fe.f9[k]); j += ",\"mid\":"; append_f17(j, fe.mid_price[k]);
   j += ",\"pdiff\":"; append_f17(j, pdiff);
-  j += "},\"source_raw\":{\"ob\":[";
+  j += "},\"source_raw\":{\"bt\":[";
+  for (std::size_t i = 0; i < rb.bt.size(); ++i) {   // OKX booktick(BBO): [ts,bid_px0,ask_px0,bid_sz0,ask_sz0,update_id]
+    const auto& e = rb.bt[i];
+    if (i) j += ',';
+    j += '['; j += std::to_string(e.ts); j += ','; j += std::to_string(e.bid_px0); j += ','; j += std::to_string(e.ask_px0);
+    j += ','; append_f17(j, e.bid_sz0); j += ','; append_f17(j, e.ask_sz0);
+    j += ','; j += std::to_string(e.update_id); j += ']';
+  }
+  j += "],\"ob\":[";
   for (std::size_t i = 0; i < rb.ob.size(); ++i) {
     const auto& e = rb.ob[i];
     if (i) j += ',';

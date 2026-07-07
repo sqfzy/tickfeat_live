@@ -40,4 +40,13 @@ struct BnMidEvent {
     uint64_t update_id{0};
 };
 
+// OKX booktick(BBO, 1 档): mid/imb1/spread 的源(不再用 orderbook 的这三个)。
+// 价 ×1e8 原始; L0 量原始币量(同 ObEvent, 引擎内 /PX_SCALE)。imb5 仍来自 ObEvent(5 档)。
+struct OkxBookTickEvent {
+    int64_t  ts;
+    int64_t  bid_px0, ask_px0;
+    double   bid_sz0, ask_sz0;
+    uint64_t update_id{0};
+};
+
 } // namespace tick_feat::live
