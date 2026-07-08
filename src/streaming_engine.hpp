@@ -39,6 +39,7 @@ public:
         advance_to(ev.ts);
         latest_bt_ = ev; have_latest_bt_ = true;
         bt_bucket_last_mid_ = ob_mid_scaled(ev.bid_px0, ev.ask_px0);   // 桶末 mid
+        bt_bucket_last_bid_ = ev.bid_px0; bt_bucket_last_ask_ = ev.ask_px0;  // 桶末整数价(factor_calc_v2 int 口径 pdiff_v2 用)
         has_bt_this_sec_ = true;
         bt_cur_.push_back(ev);   // 源 raw
         if (ev.ts == cur_sec_) { boundary_bt_ = ev; have_boundary_bt_ = true; }  // 秒首 as-of
@@ -56,6 +57,7 @@ public:
     void feed_bn_mid(const BnMidEvent& ev) {
         advance_to(ev.ts);
         bn_bucket_last_mid_  = ob_mid_scaled(ev.bid_px0, ev.ask_px0);
+        bn_bucket_last_bid_ = ev.bid_px0; bn_bucket_last_ask_ = ev.ask_px0;  // 桶末整数价(pdiff_v2 as-of 用)
         bn_has_mid_this_sec_ = true;
         bn_cur_.push_back(ev);   // 源 raw:留存本秒 BN 事件
     }
@@ -105,6 +107,7 @@ private:
         if (!bn_has_mid_this_sec_) return;
         bn_ts_.push_back(cur_sec_);
         bn_mid_.push_back(bn_bucket_last_mid_);
+        bn_bid_.push_back(bn_bucket_last_bid_); bn_ask_.push_back(bn_bucket_last_ask_);  // as-of int mid 用
     }
 
     void settle_okx_sec() {
@@ -142,20 +145,25 @@ private:
         cs_lr2_.push_back((cs_lr2_.empty() ? 0.0 : cs_lr2_.back()) + lr * lr);
 
         // pdiff: bn 桶末 mid as-of(ts≤q 的最后 bn 秒)
-        double pdiff = 0.0, pcnt = 0.0, pdiff_v2 = 0.0;
+        double pdiff = 0.0, pcnt = 0.0; std::int64_t pdiff_v2 = 0;
         const std::int64_t bi = prev_index(bn_ts_, q);
         if (bi >= 0) {
             const double bn_m = bn_mid_[static_cast<std::size_t>(bi)];
             if (bn_m > 0.0 && std::isfinite(mid) && mid > 0.0) {
                 pdiff = (mid - bn_m) / bn_m * 1e4; pcnt = 1.0;
-                pdiff_v2 = (bn_m - mid) / mid * 1e9;   // factor_calc_v2 口径: (close=bn - open=okx)/open × 1e9, 桶末 mid
+                // factor_calc_v2 整数口径 verbatim: mid=(bid+ask)/2(int); pdiff=(bn_mid-okx_mid)*1e9/okx_mid(int64 向零截断)
+                const std::int64_t okx_mid_i = (bt_bucket_last_bid_ + bt_bucket_last_ask_) / 2;
+                const std::int64_t bn_mid_i  = (bn_bid_[static_cast<std::size_t>(bi)] + bn_ask_[static_cast<std::size_t>(bi)]) / 2;
+                if (okx_mid_i > 0 && bn_mid_i > 0)
+                    pdiff_v2 = (bn_mid_i - okx_mid_i) * 1000000000LL / okx_mid_i;
             }
         }
         cs_pdiff_.push_back((cs_pdiff_.empty() ? 0.0 : cs_pdiff_.back()) + pdiff);
         cs_pcnt_.push_back((cs_pcnt_.empty() ? 0.0 : cs_pcnt_.back()) + pcnt);
-        cs_pdiff_v2_.push_back((cs_pdiff_v2_.empty() ? 0.0 : cs_pdiff_v2_.back()) + pdiff_v2);
+        // cs_pdiff_v2_ 存整数 pdiff_v2 的累加(整数 <2^53 → double 精确, rolling 差仍精确整数)
+        cs_pdiff_v2_.push_back((cs_pdiff_v2_.empty() ? 0.0 : cs_pdiff_v2_.back()) + static_cast<double>(pdiff_v2));
         pdiff_.push_back(pcnt > 0.0 ? pdiff : std::numeric_limits<double>::quiet_NaN());  // 瞬时值旁路(cs_pdiff_ 仍 +0 保 pm 不变)
-        pdiff_v2_.push_back(pcnt > 0.0 ? pdiff_v2 : std::numeric_limits<double>::quiet_NaN());
+        pdiff_v2_.push_back(pcnt > 0.0 ? static_cast<double>(pdiff_v2) : std::numeric_limits<double>::quiet_NaN());
 
         // 源 raw:留存本秒消费的原始事件(has_ob 恒真→ob 非空;bn/trade 该秒无则空)。move 走, reset 清缓冲。
         raw_.push_back(RawBucket{std::move(bt_cur_), std::move(ob_cur_), std::move(tr_cur_), std::move(bn_cur_)});
@@ -188,9 +196,11 @@ private:
         const double pm_12h_n = rolling_sum_asof(cs_pcnt_,  ts_sec_, q, 43200);
         const double pm_12h   = (pm_12h_n > 0) ? pm_12h_s / pm_12h_n : 0.0;
 
-        // factor_calc_v2 口径 mean: pdiff_v2 的 12h 均值; 需 ≥3h(10800s)有效样本, 否则 0(同 v2 mean_min_s)
+        // factor_calc_v2 口径 mean: pdiff_v2 的 12h 均值; ≥3h(10800s)有效样本才出, 否则 0(同 v2 mean_min_s)。
+        // v2 TimeRing.avg verbatim: avg_out=(int64)(sum/count); mv2_s 是整数 pdiff_v2 的精确和。
         const double mv2_s   = rolling_sum_asof(cs_pdiff_v2_, ts_sec_, q, 43200);
-        const double mean_v2 = (pm_12h_n >= 10800.0) ? mv2_s / pm_12h_n : 0.0;
+        const double mean_v2 = (pm_12h_n >= 10800.0 && pm_12h_n > 0.0)
+                                 ? static_cast<double>(static_cast<std::int64_t>(mv2_s / pm_12h_n)) : 0.0;
         mean_v2_.push_back(mean_v2);
 
         out_.ts_us.push_back(q);
@@ -208,6 +218,7 @@ private:
     // OKX booktick(BBO): 驱动行 + mid(桶末)/imb1/spread(as-of) 的源
     bool    has_bt_this_sec_    = false;
     double  bt_bucket_last_mid_ = 0.0;
+    std::int64_t bt_bucket_last_bid_ = 0, bt_bucket_last_ask_ = 0;   // 桶末整数价(factor_calc_v2 int pdiff_v2)
     bool    have_latest_bt_   = false; OkxBookTickEvent latest_bt_{};
     bool    have_boundary_bt_ = false; OkxBookTickEvent boundary_bt_{};
     // OKX DepthBoard(5 档): 只供 imb5 的 as-of
@@ -224,8 +235,10 @@ private:
     // ── BN 当前桶 + 历史 ──
     bool    bn_has_mid_this_sec_ = false;
     double  bn_bucket_last_mid_  = 0.0;
+    std::int64_t bn_bucket_last_bid_ = 0, bn_bucket_last_ask_ = 0;   // 桶末整数价(pdiff_v2 as-of)
     std::vector<int64_t> bn_ts_;
     std::vector<double>  bn_mid_;
+    std::vector<int64_t> bn_bid_, bn_ask_;   // 与 bn_ts_/bn_mid_ 逐秒对齐, as-of int mid 用
 
     // ── pdiff 历史(与 okx 网格对齐) ──
     std::vector<double> cs_pdiff_, cs_pcnt_;
