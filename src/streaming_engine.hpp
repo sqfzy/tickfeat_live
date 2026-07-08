@@ -26,23 +26,15 @@ class StreamingFeatureEngine {
 public:
     StreamingFeatureEngine() = default;
 
-    // OKX DepthBoard(5 档): 只供 imb5 的 as-of 盘口(mid/imb1/spread 已改用 booktick, 见 feed_okx_booktick)。
+    // OKX DepthBoard(5 档): mid(桶末)/imb1/imb5/spread(as-of) 的源。行由它驱动(has_ob_this_sec_)。
     void feed_okx_ob(const ObEvent& ev) {
         advance_to(ev.ts);
         latest_ob_ = ev; have_latest_ob_ = true;
-        ob_cur_.push_back(ev);   // 源 raw:留存本秒消费的 OB 约简事件(imb5 用)
+        bucket_last_mid_ = ob_mid_scaled(ev.bid_px0, ev.ask_px0);   // 桶末 mid
+        ob_bucket_last_bid_ = ev.bid_px0; ob_bucket_last_ask_ = ev.ask_px0;  // 桶末整数价(factor_calc_v2 int 口径 pdiff_v2 用)
+        has_ob_this_sec_ = true;
+        ob_cur_.push_back(ev);   // 源 raw:留存本秒消费的 OB 约简事件(喂回引擎即复现)
         if (ev.ts == cur_sec_) { boundary_ob_ = ev; have_boundary_ob_ = true; }  // ts≤秒起点 含 ts==秒起点
-    }
-
-    // OKX booktick(BBO): mid(桶末)/imb1/spread(as-of) 的源。行由它驱动(has_bt_this_sec_)。
-    void feed_okx_booktick(const OkxBookTickEvent& ev) {
-        advance_to(ev.ts);
-        latest_bt_ = ev; have_latest_bt_ = true;
-        bt_bucket_last_mid_ = ob_mid_scaled(ev.bid_px0, ev.ask_px0);   // 桶末 mid
-        bt_bucket_last_bid_ = ev.bid_px0; bt_bucket_last_ask_ = ev.ask_px0;  // 桶末整数价(factor_calc_v2 int 口径 pdiff_v2 用)
-        has_bt_this_sec_ = true;
-        bt_cur_.push_back(ev);   // 源 raw
-        if (ev.ts == cur_sec_) { boundary_bt_ = ev; have_boundary_bt_ = true; }  // 秒首 as-of
     }
 
     void feed_okx_trade(const TradeEvent& ev) {
@@ -78,7 +70,7 @@ public:
 
     // 源 raw 旁路(与 out_ 逐行对齐):每行=该秒引擎实际消费的原始事件(OB 约简快照/成交/BN)。
     // 逐字留存, 喂回引擎即逐位复现该行因子 —— 取代 id lo/hi 摘要。emit dump 后置空释放(非 const)。
-    struct RawBucket { std::vector<OkxBookTickEvent> bt; std::vector<ObEvent> ob; std::vector<TradeEvent> tr; std::vector<BnMidEvent> bn; };
+    struct RawBucket { std::vector<ObEvent> ob; std::vector<TradeEvent> tr; std::vector<BnMidEvent> bn; };
     std::vector<RawBucket>& raw_series() { return raw_; }
 
 private:
@@ -88,13 +80,12 @@ private:
         if (new_sec == cur_sec_) return;             // 同秒, 继续累积
         if (started_) { settle_bn_sec(); settle_okx_sec(); }
         cur_sec_ = new_sec; started_ = true;
-        has_bt_this_sec_ = false;
+        has_ob_this_sec_ = false;
         sv_ = sv_comp_ = av_ = av_comp_ = 0.0;
-        boundary_ob_ = latest_ob_; have_boundary_ob_ = have_latest_ob_;  // imb5 as-of=进入新秒时最新 depth
-        boundary_bt_ = latest_bt_; have_boundary_bt_ = have_latest_bt_;  // mid/imb1/spread as-of=最新 booktick
+        boundary_ob_ = latest_ob_; have_boundary_ob_ = have_latest_ob_;  // 秒首 as-of=进入新秒时最新 depth
         bn_has_mid_this_sec_ = false;
-        // 不清事件缓冲: 结算秒由 settle_okx_sec 的 std::move 清空; 未结算秒(无 booktick)的 ob/bn
-        // carry forward, 累积进下一结算行的 raw —— 否则 imb5(ob as-of)/pdiff(bn as-of)的 as-of 事件
+        // 不清事件缓冲: 结算秒由 settle_okx_sec 的 std::move 清空; 未结算秒(无 OB)的 tr/bn
+        // carry forward, 累积进下一结算行的 raw —— 否则 pdiff(bn as-of)的 as-of 事件
         // 落在未结算秒时会丢, 自复算重建不出。离线按各事件自身 ts 重新分桶, 不会跨秒串入。
     }
 
@@ -111,27 +102,24 @@ private:
     }
 
     void settle_okx_sec() {
-        if (!has_bt_this_sec_) return;               // 行由 OKX booktick 驱动(mid 来源)
+        if (!has_ob_this_sec_) return;               // 只对有 OB 的秒产行
         const int64_t q   = cur_sec_;
-        const double  mid = bt_bucket_last_mid_;      // 桶末 mid ← booktick BBO
+        const double  mid = bucket_last_mid_;         // 桶末 mid
 
+        // imb/spread: 秒首 as-of(boundary_ob); 无则 0(同离线 prev_index<0)
         double imb1 = 0.0, imb5 = 0.0, spread = 0.0;
-        if (have_boundary_bt_) {                      // imb1/spread ← booktick as-of BBO(L0 量/价)
-            const ImbSpread is = imb_spread_from_levels(
-                static_cast<double>(boundary_bt_.bid_px0) / PX_SCALE,
-                static_cast<double>(boundary_bt_.ask_px0) / PX_SCALE,
-                boundary_bt_.bid_sz0 / PX_SCALE, boundary_bt_.ask_sz0 / PX_SCALE,
-                0.0, 0.0);                            // 5-sum 不用(imb5 另算)
-            imb1 = is.imb1; spread = is.spread;
-        }
-        if (have_boundary_ob_) {                      // imb5 ← depth as-of(5 档和), 口径同 imb_spread_from_levels
+        if (have_boundary_ob_) {
             double bsz5 = 0.0, asz5 = 0.0;
-            for (int l = 0; l < 5; ++l) {
+            for (int l = 0; l < 5; ++l) {            // 逐项 /PX_SCALE 再累加(同离线 extract_ob_snapshots)
                 bsz5 += boundary_ob_.bid_sz[l] / PX_SCALE;
                 asz5 += boundary_ob_.ask_sz[l] / PX_SCALE;
             }
-            const double d5 = bsz5 + asz5;
-            if (d5 > 0.0) imb5 = (bsz5 - asz5) / d5;
+            const ImbSpread is = imb_spread_from_levels(
+                static_cast<double>(boundary_ob_.bid_px0) / PX_SCALE,
+                static_cast<double>(boundary_ob_.ask_px0) / PX_SCALE,
+                boundary_ob_.bid_sz[0] / PX_SCALE, boundary_ob_.ask_sz[0] / PX_SCALE,
+                bsz5, asz5);
+            imb1 = is.imb1; imb5 = is.imb5; spread = is.spread;
         }
 
         // log return(1s 网格): log(mid/prev_mid); 首秒/prev≤0 → 0
@@ -152,7 +140,7 @@ private:
             if (bn_m > 0.0 && std::isfinite(mid) && mid > 0.0) {
                 pdiff = (mid - bn_m) / bn_m * 1e4; pcnt = 1.0;
                 // factor_calc_v2 整数口径 verbatim: mid=(bid+ask)/2(int); pdiff=(bn_mid-okx_mid)*1e9/okx_mid(int64 向零截断)
-                const std::int64_t okx_mid_i = (bt_bucket_last_bid_ + bt_bucket_last_ask_) / 2;
+                const std::int64_t okx_mid_i = (ob_bucket_last_bid_ + ob_bucket_last_ask_) / 2;  // 桶末 OB 整数价
                 const std::int64_t bn_mid_i  = (bn_bid_[static_cast<std::size_t>(bi)] + bn_ask_[static_cast<std::size_t>(bi)]) / 2;
                 if (okx_mid_i > 0 && bn_mid_i > 0)
                     pdiff_v2 = (bn_mid_i - okx_mid_i) * 1000000000LL / okx_mid_i;
@@ -166,7 +154,7 @@ private:
         pdiff_v2_.push_back(pcnt > 0.0 ? static_cast<double>(pdiff_v2) : std::numeric_limits<double>::quiet_NaN());
 
         // 源 raw:留存本秒消费的原始事件(has_ob 恒真→ob 非空;bn/trade 该秒无则空)。move 走, reset 清缓冲。
-        raw_.push_back(RawBucket{std::move(bt_cur_), std::move(ob_cur_), std::move(tr_cur_), std::move(bn_cur_)});
+        raw_.push_back(RawBucket{std::move(ob_cur_), std::move(tr_cur_), std::move(bn_cur_)});
 
         prev_mid_ = mid; have_prev_mid_ = true;
 
@@ -214,14 +202,10 @@ private:
     // ── OKX 当前秒桶 ──
     int64_t cur_sec_         = std::numeric_limits<int64_t>::min();
     bool    started_         = false;
+    bool    has_ob_this_sec_ = false;
+    double  bucket_last_mid_ = 0.0;
+    std::int64_t ob_bucket_last_bid_ = 0, ob_bucket_last_ask_ = 0;   // 桶末整数价(factor_calc_v2 int pdiff_v2)
     double  sv_ = 0.0, sv_comp_ = 0.0, av_ = 0.0, av_comp_ = 0.0;
-    // OKX booktick(BBO): 驱动行 + mid(桶末)/imb1/spread(as-of) 的源
-    bool    has_bt_this_sec_    = false;
-    double  bt_bucket_last_mid_ = 0.0;
-    std::int64_t bt_bucket_last_bid_ = 0, bt_bucket_last_ask_ = 0;   // 桶末整数价(factor_calc_v2 int pdiff_v2)
-    bool    have_latest_bt_   = false; OkxBookTickEvent latest_bt_{};
-    bool    have_boundary_bt_ = false; OkxBookTickEvent boundary_bt_{};
-    // OKX DepthBoard(5 档): 只供 imb5 的 as-of
     bool    have_latest_ob_   = false; ObEvent latest_ob_{};
     bool    have_boundary_ob_ = false; ObEvent boundary_ob_{};
 
@@ -247,8 +231,7 @@ private:
     std::vector<double> cs_pdiff_v2_;
     std::vector<double> pdiff_v2_, mean_v2_;   // 与 out_ 逐行对齐; 不进 f0-f9
 
-    // ── 源 raw:当前秒事件缓冲(reset 每秒清 / settle move 走)+ 逐行历史(emit dump 后置空释放) ──
-    std::vector<OkxBookTickEvent> bt_cur_;
+    // ── 源 raw:当前秒事件缓冲(settle move 走, 未结算秒 carry-forward)+ 逐行历史(emit dump 后置空释放) ──
     std::vector<ObEvent>    ob_cur_;
     std::vector<TradeEvent> tr_cur_;
     std::vector<BnMidEvent> bn_cur_;

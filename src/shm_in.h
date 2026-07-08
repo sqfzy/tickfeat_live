@@ -43,9 +43,8 @@ template <class Board>
 
 // 上游三段(只读)。
 struct Inputs {
-  const v2::DepthBoard* okx_ob = nullptr;    // OKX 多档 book(只供 imb5)
-  v2::TradeRing*        okx_tr = nullptr;     // OKX 成交(drain 需非 const)
-  const v2::BookTickBoard* okx_bt = nullptr; // OKX bookTicker(BBO):mid/imb1/spread 源
+  const v2::DepthBoard* okx_ob = nullptr;   // OKX 多档 book
+  v2::TradeRing*        okx_tr = nullptr;    // OKX 成交(drain 需非 const)
   const v2::BookTickBoard* bn_bt = nullptr;  // BN bookTicker(单档 BBO,取 mid)
 };
 
@@ -72,21 +71,17 @@ struct Inputs {
 [[nodiscard]] inline bool attach_inputs(const HostConfig& cfg, Inputs& in) {
   in.okx_ob = map_segment<const v2::DepthBoard>(cfg.okx_depth.c_str(), false);
   in.okx_tr = map_segment<v2::TradeRing>(cfg.okx_trade.c_str(), false);
-  in.okx_bt = map_segment<const v2::BookTickBoard>(cfg.okx_booktick.c_str(), false);
   in.bn_bt  = map_segment<const v2::BookTickBoard>(cfg.bn_booktick.c_str(), false);
-  if (!in.okx_ob || !in.okx_tr || !in.okx_bt || !in.bn_bt) return false;
+  if (!in.okx_ob || !in.okx_tr || !in.bn_bt) return false;
   const bool ok =
       check_segment(cfg.okx_depth.c_str(), in.okx_ob->hdr, v2::SegKind::Board,
                     sizeof(v2::DepthBoardSlot), gconf::sym::N_SYMS, v2::kDepthBoardSchemaHash) &&
       check_segment(cfg.okx_trade.c_str(), in.okx_tr->hdr, v2::SegKind::BcastRing,
                     sizeof(v2::TradeEntry), v2::TRADE_RING_CAP, v2::kTradeSchemaHash) &&
-      check_segment(cfg.okx_booktick.c_str(), in.okx_bt->hdr, v2::SegKind::Board,
-                    sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS, v2::kBoardSchemaHash) &&
       check_segment(cfg.bn_booktick.c_str(), in.bn_bt->hdr, v2::SegKind::Board,
                     sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS, v2::kBoardSchemaHash);
   if (!ok) return false;
-  LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} okx_bt={} bn_bt={} (契约校验通过)",
-           cfg.okx_depth, cfg.okx_trade, cfg.okx_booktick, cfg.bn_booktick);
+  LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} bn_bt={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_booktick);
   return true;
 }
 

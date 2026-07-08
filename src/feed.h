@@ -21,20 +21,19 @@ using EngineSet = std::vector<tf::StreamingFeatureEngine>;
 
 inline EngineSet make_engines() { return EngineSet(gconf::sym::N_SYMS); }
 
-// 一条待喂事件(POD)。kind:0=ob 1=trade 2=bn 3=okx_booktick;prio:0=OKX 1=BN(同 ts OKX 先)。
+// 一条待喂事件(POD)。kind:0=ob 1=trade 2=bn;prio:0=OKX 1=BN(同 ts OKX 先)。
 struct Pending {
-  std::int64_t          ts;
-  int                   prio;
-  int                   kind;
-  tf::ObEvent           ob;
-  tf::TradeEvent        tr;
-  tf::BnMidEvent        bn;
-  tf::OkxBookTickEvent  bt;
+  std::int64_t   ts;
+  int            prio;
+  int            kind;
+  tf::ObEvent    ob;
+  tf::TradeEvent tr;
+  tf::BnMidEvent bn;
 };
 
 // 轮询/喂状态(POD)。batch 复用缓冲,不 per-tick 分配。
 struct FeedState {
-  std::vector<std::uint64_t>          okx_uid, okx_bt_uid, bn_uid;   // update_id 去重
+  std::vector<std::uint64_t>          okx_uid, bn_uid;   // update_id 去重
   std::vector<std::int64_t>           last_fed_ts;        // 单调守卫
   std::vector<std::vector<Pending>>   batch;              // per-LID,每拍清空复用
   std::uint64_t                       trade_tail = 0;
@@ -45,7 +44,6 @@ inline FeedState make_feed_state() {
   const int n = gconf::sym::N_SYMS;
   FeedState st;
   st.okx_uid.assign(n, 0);
-  st.okx_bt_uid.assign(n, 0);
   st.bn_uid.assign(n, 0);
   st.last_fed_ts.assign(n, INT64_MIN);
   st.batch.assign(n, {});
@@ -111,27 +109,12 @@ inline void collect_okx_ob(const Inputs& in, FeedState& st) {
   }
 }
 
-// OKX bookTicker 轮询去重 → OkxBookTickEvent(BBO 价+量; mid/imb1/spread 源)。一边缺(bid/ask=0)则跳过。
-inline void collect_okx_booktick(const Inputs& in, FeedState& st) {
-  for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
-    v2::BookTickBoardSlot s;
-    if (in.okx_bt->slot[lid].read(s) && s.update_id != st.okx_bt_uid[lid] && s.bid_px && s.ask_px) {
-      st.okx_bt_uid[lid] = s.update_id;
-      const std::int64_t ts = ns_to_us(s.exch_ns);
-      st.batch[lid].push_back(Pending{ts, 0, 3, {}, {}, {},
-          tf::OkxBookTickEvent{ts, px_1e8(s.bid_px, s.price_scale), px_1e8(s.ask_px, s.price_scale),
-                               amount_real(s.bid_qty, s.qty_scale), amount_real(s.ask_qty, s.qty_scale), s.update_id}});
-    }
-  }
-}
-
-// 轮询四源一拍,填 st.batch;返回本拍事件总数。
+// 轮询三源一拍,填 st.batch;返回本拍事件总数。
 inline std::size_t collect_tick(const Inputs& in, FeedState& st) {
   for (auto& v : st.batch) v.clear();
   collect_bn(in, st);
   collect_trades(in, st);
   collect_okx_ob(in, st);
-  collect_okx_booktick(in, st);
   std::size_t total = 0;
   for (auto& v : st.batch) total += v.size();
   return total;
@@ -144,8 +127,7 @@ inline void feed_one(tf::StreamingFeatureEngine& e, Pending& p, std::int64_t& la
   last_ts = p.ts;
   if (p.kind == 0)      { p.ob.ts = p.ts; e.feed_okx_ob(p.ob); }
   else if (p.kind == 1) { p.tr.ts = p.ts; e.feed_okx_trade(p.tr); }
-  else if (p.kind == 2) { p.bn.ts = p.ts; e.feed_bn_mid(p.bn); }
-  else                  { p.bt.ts = p.ts; e.feed_okx_booktick(p.bt); }
+  else                  { p.bn.ts = p.ts; e.feed_bn_mid(p.bn); }
 }
 
 // 每 LID 按 (ts, prio) 稳序喂;单 LID 内确保非降序,OKX 与 BN 同 ts 时 OKX 先。
