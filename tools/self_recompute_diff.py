@@ -5,21 +5,22 @@
 formatted, 跑黄金参照 build_tick_feat_standalone.compute_day, 逐位对回存的 f0-f9+mid。
 
 设计要点(踩过的坑):
-- 币维度独立 → multiprocessing 逐币并行; 内存 = N_WORKERS × 单币(~2GB), 不再全量载内存(曾 ~20GB OOM)。
+- 顺序逐币(不全量载内存, 曾一次载全 27 币 ~20GB OOM 崩机)。内存 = 单币峰值: 大币可 ~6-9GB
+  (桥接的 66 列全零填充 formatted + JSON 对象膨胀所致)。曾试 multiprocessing 并行, 但 N 个大币 worker
+  叠加轻松 >20GB, 反而抖动/近 OOM —— 故改回顺序, 稳。
 - 时间维度不拆(cumsum/滚动因子 f3-f9 需从冷启动连续历史), 但按币拆保留每币完整时间线, f8/f9 照算。
 - 每币数据写【单文件】(不按天拆) → depth as-of 可跨 UTC 午夜(否则 imb5 在午夜后取不到前一天末条 OB, 假告警)。
 - 跳每币【首行】(冷启动 as-of 边界: 首行 imb/spread 的 as-of OB 在录制起点之前, 文件里没有, 天然缺一格)。
 - 稀疏零洞: dump 被 copytruncate 压缩后前段是稀疏零洞, 用 SEEK_DATA 跳过。
 - 稳定排序: 桥接同 ts 多条 OB 按 (ts,update_id) 升序写(=离线 kind=stable 取末条=最高 uid)。
 
-用法: python3 self_recompute_diff.py <dump.jsonl> <CLO_us> <CHI_us> [workers=5]
+用法: python3 self_recompute_diff.py <dump.jsonl> <CLO_us> <CHI_us>
 环境: OFFLINE_DIR=<含 build_tick_feat_standalone.py 的目录> (默认 /root/tf_new/pipe);
       WORK_DIR=<临时工作目录> (默认 /root/tf_new/self_recompute_work)。
 依赖: pandas pyarrow + build_tick_feat_standalone(DepthBoard 口径, 2 参 compute_day)。
 """
 import json, os, sys, glob, shutil, datetime
 import pandas as pd, pyarrow as pa, pyarrow.parquet as pq
-from multiprocessing import Pool
 
 OFFLINE_DIR = os.environ.get("OFFLINE_DIR", "/root/tf_new/pipe")
 sys.path.insert(0, OFFLINE_DIR)
@@ -28,7 +29,6 @@ import build_tick_feat_standalone as B   # DepthBoard 口径: compute_day(okx_pa
 F   = sys.argv[1]
 CLO = int(sys.argv[2])
 CHI = int(sys.argv[3])
-NW  = int(sys.argv[4]) if len(sys.argv) > 4 else 5
 SYMBOLS = ["AAVEUSDT","ADAUSDT","APTUSDT","ARBUSDT","AVAXUSDT","AXSUSDT","BCHUSDT","BNBUSDT",
            "CRVUSDT","DOGEUSDT","DOTUSDT","ENSUSDT","HBARUSDT","LTCUSDT","OPUSDT","ORDIUSDT",
            "PEOPLEUSDT","PNUTUSDT","SANDUSDT","SOLUSDT","SUIUSDT","TIAUSDT","TRUMPUSDT",
@@ -125,16 +125,15 @@ def main():
         h.write(line); n += 1
     for h in handles.values(): h.close()
     lids = sorted(handles)
-    print(f"demux 完: {n} 行 -> {len(lids)} 币; {NW} worker 并行", flush=True)
-
-    with Pool(NW) as pool:                          # Pass 2: 逐币并行
-        results = pool.map(process_lid, lids)
+    print(f"demux 完: {n} 行 -> {len(lids)} 币; 顺序逐币(内存=单币峰值)", flush=True)
 
     AGG = {k: 0.0 for k, _ in COLMAP}; ND = {k: 0 for k, _ in COLMAP}; TOT = 0
-    for sym, agg, nd, tot in results:
+    for lid in lids:                                # Pass 2: 顺序逐币(内存有界=单币, 每币算完即释放)
+        sym, agg, nd, tot = process_lid(lid)
         TOT += tot
         for sk, _ in COLMAP:
             AGG[sk] = max(AGG[sk], agg[sk]); ND[sk] += nd[sk]
+        print(f"  {sym} 完({tot} 秒, 累计 {TOT})", flush=True)
 
     print(f"\n对比秒数(共同, 已跳每币首行)={TOT}")
     print("列   max|diff|      有差秒")
