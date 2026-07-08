@@ -185,10 +185,11 @@ private:
         const double pm_12h   = (pm_12h_n > 0) ? pm_12h_s / pm_12h_n : 0.0;
 
         // factor_calc_v2 口径 mean: pdiff_v2 的 12h 均值; ≥3h(10800s)有效样本才出, 否则 0(同 v2 mean_min_s)。
-        // v2 TimeRing.avg verbatim: avg_out=(int64)(sum/count); mv2_s 是整数 pdiff_v2 的精确和。
+        // v2 逐字复刻其浮点序列: TimeRing.avg 返回 avg=(double)sum/count/1e9, 写出取 (int64)(avg*1e9)。
+        // 这个 /1e9 再 *1e9 的往返不可省 —— 偶发 1 ULP 舍入会翻转截断, 略去则与 v2 差 1(1e-9)。
         const double mv2_s   = rolling_sum_asof(cs_pdiff_v2_, ts_sec_, q, 43200);
         const double mean_v2 = (pm_12h_n >= 10800.0 && pm_12h_n > 0.0)
-                                 ? static_cast<double>(static_cast<std::int64_t>(mv2_s / pm_12h_n)) : 0.0;
+                                 ? static_cast<double>(static_cast<std::int64_t>((mv2_s / pm_12h_n / 1e9) * 1e9)) : 0.0;
         mean_v2_.push_back(mean_v2);
 
         out_.ts_us.push_back(q);
