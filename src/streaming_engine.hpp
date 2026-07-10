@@ -73,6 +73,14 @@ public:
     struct RawBucket { std::vector<ObEvent> ob; std::vector<TradeEvent> tr; std::vector<BnMidEvent> bn; };
     std::vector<RawBucket>& raw_series() { return raw_; }
 
+    // 调试: 暴露 cumsum 与秒网格, 供逐值对照离线 np.cumsum(定位 cs_avol 的 1 ulp)。
+    const std::vector<double>&  dbg_cs_avol() const { return cs_avol_; }
+    const std::vector<double>&  dbg_cs_svol() const { return cs_svol_; }
+    const std::vector<int64_t>& dbg_ts_sec()  const { return ts_sec_; }
+    std::size_t                 dbg_rebase_count() const { return rebase_count_; }   // cs rebase 触发次数
+    const std::vector<double>&  dbg_av_series() const { return av_series_; }         // 每秒精确 av 增量(真值参照用)
+    const std::vector<double>&  dbg_sv_series() const { return sv_series_; }
+
 private:
     // watermark 推进: 跨秒时先结算 cur_sec(先 bn 后 okx), 再开启新秒。
     void advance_to(int64_t ts) {
@@ -131,6 +139,8 @@ private:
         cs_svol_.push_back((cs_svol_.empty() ? 0.0 : cs_svol_.back()) + sv_);
         cs_avol_.push_back((cs_avol_.empty() ? 0.0 : cs_avol_.back()) + av_);
         cs_lr2_.push_back((cs_lr2_.empty() ? 0.0 : cs_lr2_.back()) + lr * lr);
+        av_series_.push_back(av_); sv_series_.push_back(sv_);   // 每秒精确增量, 供 cs rebase 重累
+        maybe_rebase_cs();                                      // 量级超阈则 rebase cs_avol_/cs_svol_(防长跑相减退化)
 
         // pdiff: bn 桶末 mid as-of(ts≤q 的最后 bn 秒)
         double pdiff = 0.0, pcnt = 0.0; std::int64_t pdiff_v2 = 0;
@@ -200,6 +210,25 @@ private:
         out_.mid_price.push_back(mid_now);
     }
 
+    // cs_avol_ 恒正累加, 长跑量级涨到 1e11 → rolling_sum_asof 的 cs[q]-cs[q-60] 大数相减精度退化
+    // (f3/f4; 见 dbg_rebase.py 数值复现)。触发式 rebase: 量级超阈值时, 把最近 REBASE_KEEP 个条目的
+    // cs 从 0 用【精确增量】重累, 拉回小量级 → 相减恢复精确。只碰 cs_avol_/cs_svol_(仅 f3/f4 用, 窗 60s);
+    // 重累是常数平移(cs[i]-=cs[base-1]), 保留窗内所有差值; 老条目(<base)永不被 60s 窗读到, 无副作用。
+    // 阈值 2e10 ≫ --verify 2h 窗的 ~1e9 → 短验证不触发, 与批处理 naive cumsum 保持逐位一致;
+    // 仅生产连跑 >1 天(cs>2e10)才触发, 与全序列 naive 离线差 ~ulp(2e10)≈3.8e-10(<1e-9, 且无人跑多天 naive 离线)。
+    void maybe_rebase_cs() {
+        if (cs_avol_.back() <= REBASE_THRESHOLD) return;
+        const std::size_t n = cs_avol_.size();
+        if (n <= REBASE_KEEP) return;
+        const std::size_t base = n - REBASE_KEEP;               // 起点; [base,n) 从 0 重累
+        double a = 0.0, s = 0.0;
+        for (std::size_t i = base; i < n; ++i) {                // 精确增量顺序累加(同 np.cumsum, 但从近端 0 起 → 量级小)
+            a += av_series_[i]; s += sv_series_[i];
+            cs_avol_[i] = a; cs_svol_[i] = s;
+        }
+        ++rebase_count_;
+    }
+
     // ── OKX 当前秒桶 ──
     int64_t cur_sec_         = std::numeric_limits<int64_t>::min();
     bool    started_         = false;
@@ -214,6 +243,11 @@ private:
     std::vector<int64_t> ts_sec_;
     std::vector<double>  mid_, imb1_, imb5_, spread_;
     std::vector<double>  cs_svol_, cs_avol_, cs_lr2_;
+    // cs rebase(防 cs_avol_/cs_svol_ 长跑相减退化): 存每秒精确增量, 量级超阈时最近 REBASE_KEEP 条从 0 重累。
+    std::vector<double>  av_series_, sv_series_;
+    std::size_t          rebase_count_ = 0;
+    static constexpr double      REBASE_THRESHOLD = 2e10;   // cs_avol 超此值触发(约 1 天量级); ≫ --verify 窗
+    static constexpr std::size_t REBASE_KEEP      = 130;    // 重累保留的条目数(>60s 窗 + 余量; 每条≥1s → ≥130s)
     double prev_mid_      = 0.0;
     bool   have_prev_mid_ = false;
 
