@@ -18,6 +18,7 @@ struct HostConfig {
   int         poll_us = 200;
   int         progress_sec = 5;
   std::string dump;        // --dump <csv>:每条结算行落盘(对拍/复现);空=不落盘
+  std::string funding_seg; // --funding <seg>:资金费率输入段(FundingShm,订阅者写);空=不读(funding=NaN)
 };
 
 inline void print_usage(const char* argv0) {
@@ -27,6 +28,7 @@ inline void print_usage(const char* argv0) {
       "  注: mid/imb1/imb5/spread 全用 OKX DepthBoard(5 档)。\n"
       "  cpu: 绑核(缺省 -1 不绑); poll_us: 轮询间隔(缺省 200)。\n"
       "  --dump <csv>: 每条结算行落 CSV(Quill 异步,不影响热路径;逐位对拍/复现用,无漏秒)。\n"
+      "  --funding <seg>: 资金费率输入段(funding_sub 写);缺省不读, okx/bn_funding=NaN。\n"
       "  监控(每币每秒 10 因子必更新)走 Quill 日志:漏秒即 WARN,progress 汇总本周期漏秒事件数。\n",
       argv0);
 }
@@ -38,6 +40,7 @@ inline void print_usage(const char* argv0) {
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--dump" && i + 1 < argc) cfg.dump = argv[++i];
+    else if (a == "--funding" && i + 1 < argc) cfg.funding_seg = argv[++i];
     else pos.push_back(a);
   }
   if (pos.size() < 4) { print_usage(argv[0]); std::exit(2); }

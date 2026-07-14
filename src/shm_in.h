@@ -20,6 +20,7 @@
 
 #include <gconf/shm/v2/factor_board.h>
 #include "config.h"
+#include "funding_shm.h"
 
 namespace tflive {
 
@@ -46,6 +47,7 @@ struct Inputs {
   const v2::DepthBoard* okx_ob = nullptr;   // OKX 多档 book
   v2::TradeRing*        okx_tr = nullptr;    // OKX 成交(drain 需非 const)
   const v2::BookTickBoard* bn_bt = nullptr;  // BN bookTicker(单档 BBO,取 mid)
+  const FundingShm*        funding = nullptr; // 资金费率(可选:订阅者写;nullptr=未启用→funding=NaN)
 };
 
 // 段头契约校验:逐字段比对本进程编译期常量。生产者(jt_dev3)独立编译,book25/trade 契约一旦漂移
@@ -82,6 +84,12 @@ struct Inputs {
                     sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS, v2::kBoardSchemaHash);
   if (!ok) return false;
   LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} bn_bt={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_booktick);
+  // funding 段可选: 内部段(无 SegHeader/schema_check), 缺省不读。连不上仅告警, 不致命(funding=NaN, 其它因子照常)。
+  if (!cfg.funding_seg.empty()) {
+    in.funding = map_segment<const FundingShm>(cfg.funding_seg.c_str(), false);
+    if (in.funding) LOG_INFO(g_log, "attach: funding={} (资金费率输入)", cfg.funding_seg);
+    else LOG_WARNING(g_log, "funding 段 {} 连不上 → okx/bn_funding 记 NaN, 不影响其它因子", cfg.funding_seg);
+  }
   return true;
 }
 

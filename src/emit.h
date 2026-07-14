@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include "tick_feat.hpp"   // tick_feat::Features
 
 #include "feed.h"          // EngineSet
+#include "funding_shm.h"   // FundingShm(资金费率输入)
 
 namespace tflive {
 
@@ -46,19 +48,38 @@ inline std::uint16_t valid_mask_of(std::int64_t span_s) {
   return m;
 }
 
-// 写该 LID 的最新一行到段(µs→ns)。pdiff 为该行瞬时基差(NaN=无 bn as-of),finite 则置 valid bit11。
+// 读该 LID 最新 funding(seqlock 重试);无段/无数据/stale → NaN。row_ts_ns 用于老化判定。
+// 费率是透传值(非逐秒算):订阅者低频写, 引擎取当下最新, 老化超 kFundingStaleNs 视作无效。
+inline void read_funding(const FundingShm* fsh, int lid, std::int64_t row_ts_ns,
+                         double& okx_out, double& bn_out) {
+  const double kNaN = std::numeric_limits<double>::quiet_NaN();
+  okx_out = bn_out = kNaN;
+  if (!fsh) return;
+  FundingSlot s;
+  for (int t = 0; t < 4; ++t) {                       // 撕裂重试(费率低频, 极罕见)
+    if (!fsh->slot[lid].read(s)) continue;
+    if (s.okx_ts_ns != 0 && (row_ts_ns - s.okx_ts_ns) < kFundingStaleNs) okx_out = s.okx_rate;
+    if (s.bn_ts_ns  != 0 && (row_ts_ns - s.bn_ts_ns)  < kFundingStaleNs) bn_out  = s.bn_rate;
+    return;
+  }
+}
+
+// 写该 LID 的最新一行到段(µs→ns)。pdiff/funding 为透传值(NaN=无),finite 则置对应 valid bit。
 inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Features& fe,
-                         double pdiff, double pdiff_v2, double mean_v2, std::int64_t first_ts) {
+                         double pdiff, double pdiff_v2, double mean_v2,
+                         double okx_funding, double bn_funding, std::int64_t first_ts) {
   const std::size_t i = fe.rows() - 1;
   const std::int64_t span_s = (fe.ts_us[i] - first_ts) / 1'000'000;
   std::uint16_t mask = valid_mask_of(span_s);
   if (std::isfinite(pdiff)) mask |= (1u << 11);      // pdiff→bit11
   if (std::isfinite(pdiff_v2)) mask |= (1u << 12);   // pdiff_v2→bit12
   if (span_s >= 10800) mask |= (1u << 13);           // mean_v2→bit13(≥3h 有效样本)
+  if (std::isfinite(okx_funding)) mask |= (1u << 14); // okx_funding→bit14
+  if (std::isfinite(bn_funding))  mask |= (1u << 15); // bn_funding→bit15
   const double f10[v2::kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
                                        fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
   v2::factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
-                   mask, f10, fe.mid_price[i], pdiff, pdiff_v2, mean_v2);
+                   mask, f10, fe.mid_price[i], pdiff, pdiff_v2, mean_v2, okx_funding, bn_funding);
 }
 
 // 全精度 double → JSON(NaN→null 保合法 JSON;finite 用 %.17g round-trip 可逐位复现)。
@@ -71,7 +92,7 @@ inline void append_f17(std::string& s, double v) {
 // source_raw 喂回引擎(feed_okx_ob/trade/bn_mid)即逐位复现本行因子 —— 取代旧的 id lo/hi 摘要。
 // ob=[ts,bid_px0,ask_px0, bid_sz0..4, ask_sz0..4, update_id]; tr=[ts,side,price_scaled,amount,exch_ns,trade_id]; bn=[ts,bid_px0,ask_px0,update_id]。
 inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe, double pdiff,
-                     double pdiff_v2, double mean_v2,
+                     double pdiff_v2, double mean_v2, double okx_funding, double bn_funding,
                      const tf::StreamingFeatureEngine::RawBucket& rb, std::size_t k) {
   std::string j; j.reserve(8192);
   j += "{\"lid\":"; j += std::to_string(lid);
@@ -85,6 +106,8 @@ inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe
   j += ",\"pdiff\":"; append_f17(j, pdiff);
   j += ",\"pdiff_v2\":"; append_f17(j, pdiff_v2);   // factor_calc_v2 口径基差
   j += ",\"mean_v2\":"; append_f17(j, mean_v2);     // 其 12h 均值(≥3h valid, 否则 0)
+  j += ",\"okx_funding\":"; append_f17(j, okx_funding);  // OKX 资金费率(透传, NaN=无/stale)
+  j += ",\"bn_funding\":"; append_f17(j, bn_funding);    // BN 资金费率(透传, NaN=无/stale)
   j += "},\"source_raw\":{\"ob\":[";
   for (std::size_t i = 0; i < rb.ob.size(); ++i) {
     const auto& e = rb.ob[i];
@@ -113,7 +136,8 @@ inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe
 }
 
 // 各引擎有新结算秒 → 写段;逐新秒查「每币每秒必更新」,相邻秒差 !=1s 即漏秒(WARN)。返回本拍写出行数。
-inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState& es) {
+inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState& es,
+                                const FundingShm* funding) {
   std::size_t emitted = 0;
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     const auto& fe = eng[lid].features();
@@ -123,6 +147,9 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
     auto&       raw = eng[lid].raw_series();    // 源 raw 旁路(非 const:dump 后置空释放), 与 fe 逐行对齐
     const std::size_t r = fe.rows();
     if (r <= es.last_rows[lid]) continue;
+    // 资金费率: 本拍取该 LID 当下最新值(透传), 本拍所有新秒共用(费率低频)。
+    double okxf, bnf;
+    read_funding(funding, lid, fe.ts_us[r - 1] * 1000, okxf, bnf);
     if (es.last_rows[lid] == 0) {
       es.first_row_ts[lid] = fe.ts_us.front();
       LOG_DEBUG(g_log, "首因子 lid={} ts_us={}", lid, fe.ts_us.front());
@@ -136,13 +163,13 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
                       lid, es.last_emit_ts[lid], fe.ts_us[k], d / 1'000'000 - 1);
         }
       }
-      if (g_dump) dump_row(g_dump, lid, fe, pd[k], pd2[k], mv2[k], raw[k], k);  // 逐条落 JSONL(factors+完整 raw;不漏秒)
+      if (g_dump) dump_row(g_dump, lid, fe, pd[k], pd2[k], mv2[k], okxf, bnf, raw[k], k);  // 逐条落 JSONL(factors+funding+完整 raw;不漏秒)
       raw[k] = tf::StreamingFeatureEngine::RawBucket{};         // dump 后释放该秒 raw, 防 raw_ 无界增长
       es.last_emit_ts[lid] = fe.ts_us[k];
     }
     emitted += r - es.last_rows[lid];
     es.last_rows[lid] = r;
-    write_latest(out, lid, fe, pd[r - 1], pd2[r - 1], mv2[r - 1], es.first_row_ts[lid]);
+    write_latest(out, lid, fe, pd[r - 1], pd2[r - 1], mv2[r - 1], okxf, bnf, es.first_row_ts[lid]);
   }
   return emitted;
 }

@@ -75,7 +75,7 @@ void run_replay(const tflive::HostConfig& cfg, tflive::Inputs& in,
     const auto t0 = clk::now();
     const std::size_t ev = tflive::collect_tick(in, fst);
     tflive::feed_in_order(eng, fst);
-    tflive::emit_settled(eng, out, est);
+    tflive::emit_settled(eng, out, est, in.funding);
     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(clk::now() - t0).count();
     observe(pr, ev, static_cast<std::uint64_t>(us), est.gap_events, cfg);
     std::this_thread::sleep_for(std::chrono::microseconds(cfg.poll_us));
