@@ -74,7 +74,8 @@ struct Inputs {
   in.okx_ob = map_segment<const v2::DepthBoard>(cfg.okx_depth.c_str(), false);
   in.okx_tr = map_segment<v2::TradeRing>(cfg.okx_trade.c_str(), false);
   in.bn_bt  = map_segment<const v2::BookTickBoard>(cfg.bn_booktick.c_str(), false);
-  if (!in.okx_ob || !in.okx_tr || !in.bn_bt) return false;
+  in.funding = map_segment<const FundingShm>(cfg.funding_seg.c_str(), false);  // 必需输入(内部段无 seg_check)
+  if (!in.okx_ob || !in.okx_tr || !in.bn_bt || !in.funding) return false;
   const bool ok =
       check_segment(cfg.okx_depth.c_str(), in.okx_ob->hdr, v2::SegKind::Board,
                     sizeof(v2::DepthBoardSlot), gconf::sym::N_SYMS, v2::kDepthBoardSchemaHash) &&
@@ -83,13 +84,8 @@ struct Inputs {
       check_segment(cfg.bn_booktick.c_str(), in.bn_bt->hdr, v2::SegKind::Board,
                     sizeof(v2::BookTickBoardSlot), gconf::sym::N_SYMS, v2::kBoardSchemaHash);
   if (!ok) return false;
-  LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} bn_bt={} (契约校验通过)", cfg.okx_depth, cfg.okx_trade, cfg.bn_booktick);
-  // funding 段可选: 内部段(无 SegHeader/schema_check), 缺省不读。连不上仅告警, 不致命(funding=NaN, 其它因子照常)。
-  if (!cfg.funding_seg.empty()) {
-    in.funding = map_segment<const FundingShm>(cfg.funding_seg.c_str(), false);
-    if (in.funding) LOG_INFO(g_log, "attach: funding={} (资金费率输入)", cfg.funding_seg);
-    else LOG_WARNING(g_log, "funding 段 {} 连不上 → okx/bn_funding 记 NaN, 不影响其它因子", cfg.funding_seg);
-  }
+  LOG_INFO(g_log, "attach: okx_ob={} okx_tr={} bn_bt={} funding={} (契约校验通过)",
+           cfg.okx_depth, cfg.okx_trade, cfg.bn_booktick, cfg.funding_seg);
   return true;
 }
 
