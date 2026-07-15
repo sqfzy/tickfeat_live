@@ -52,14 +52,25 @@ inline FeedState make_feed_state() {
 
 // —— 收集(各源一件事)——
 
+// update_id 新鲜判定:只收【前进】的。
+// DepthBoard 无 claim_if_newer 竞速闸(只有 BookTickBoard 有),多路竞速可把【陈旧快照】写回槽致 uid 回退
+// ——实测 uid 88815936318→88815936298(旧快照重现),原 `!=` 判定把它当新数据吃进去,成了该秒的
+// 秒首 as-of(boundary_ob) → f0/f1 偏 2e-5(离线按 (ts,uid) 排序取最高 uid,是对的)。
+// 大幅回退(> kUidResetGap)视为生产者重启/重连的 uid 重置 → 接受并重同步(否则永久拒收所有数据)。
+// 实测量级:交易所 seqId ~9e10,陈旧回退仅 ~20,重启回退 ~9e10 —— 1e6 干净分开两者。
+inline constexpr std::uint64_t kUidResetGap = 1'000'000;
+[[nodiscard]] inline bool uid_fresh(std::uint64_t uid, std::uint64_t last) noexcept {
+  return uid > last || (last - uid) > kUidResetGap;   // 前进 或 判定为重置(前者假才算差,无下溢)
+}
+
 // BN 多档 book 轮询去重 → BnMidEvent(取 L0)。
 // BN bookTicker 轮询去重 → BnMidEvent(单档 BBO 的 mid)。
 // 不过滤(极端单边 bid/ask=0):与离线口径一致,引擎 bn_m>0 守卫使该秒基差作废(pdiff=0)。
-// update_id!=bn_uid 已挡住未写过的槽(uid=0)。
+// uid_fresh 也挡住未写过的槽(uid=0 vs last=0 → 不前进、回退量 0 → 拒)。
 inline void collect_bn(const Inputs& in, FeedState& st) {
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     v2::BookTickBoardSlot s;
-    if (in.bn_bt->slot[lid].read(s) && s.update_id != st.bn_uid[lid]) {
+    if (in.bn_bt->slot[lid].read(s) && uid_fresh(s.update_id, st.bn_uid[lid])) {
       st.bn_uid[lid] = s.update_id;
       const std::int64_t ts = ns_to_us(s.exch_ns);
       st.batch[lid].push_back(Pending{ts, 1, 2, {}, {},
@@ -102,7 +113,7 @@ inline Pending make_ob_pending(const v2::DepthBoardSlot& s) {
 inline void collect_okx_ob(const Inputs& in, FeedState& st) {
   for (int lid = 0; lid < gconf::sym::N_SYMS; ++lid) {
     v2::DepthBoardSlot s;
-    if (in.okx_ob->slot[lid].read(s) && s.update_id != st.okx_uid[lid] && s.depth >= 1 && s.bid_px[0] && s.ask_px[0]) {
+    if (in.okx_ob->slot[lid].read(s) && uid_fresh(s.update_id, st.okx_uid[lid]) && s.depth >= 1 && s.bid_px[0] && s.ask_px[0]) {
       st.okx_uid[lid] = s.update_id;
       st.batch[lid].push_back(make_ob_pending(s));
     }
