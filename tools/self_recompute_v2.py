@@ -143,7 +143,6 @@ def process_lid(lid):
 
     okx = sorted(glob.glob(f"{outdir}/okx_swap_{sym}_*.parquet"))
     bnp = sorted(glob.glob(f"{outdir}/binance_swap_{sym}_*.parquet"))
-    first_ts = min(stored) if stored else None
     v2 = recompute_v2(ob_sorted, bn_sorted, sorted(stored))
     agg = {k: 0.0 for k, _ in COLMAP}; nd = {k: 0 for k, _ in COLMAP}; exc = {k: 0 for k, _ in COLMAP}
     aggv = {k: 0.0 for k in V2COLS}; ndv = {k: 0 for k in V2COLS}; excv = {k: 0 for k in V2COLS}; tot = 0
@@ -153,7 +152,9 @@ def process_lid(lid):
         if ref is None or ref.empty: continue
         rmap = {int(r.ts_us): r for r in ref.itertuples()}
         for t, fac in stored.items():
-            if t == first_ts or dateof(t) != D or t not in rmap: continue
+            # 第一秒【不跳过】: CLO 取 restart-5s 后, 引擎首秒(半截桶)与离线逐位吻合(实测全13列0);
+            # 跳过它只会把"首行被 CLO 滤掉"这类病灶藏起来(它照进 cumsum 会污染 f9/mean_v2)。
+            if dateof(t) != D or t not in rmap: continue
             if t < DFROM: continue                 # 暖机区不计 diff(仍进 compute_day/recompute 供暖机)
             tot += 1; rr = rmap[t]
             for sk, rk in COLMAP:
