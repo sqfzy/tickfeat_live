@@ -23,7 +23,8 @@ for seg in os.environ.get("SEAM", "").split(","):
         a, b = seg.split("-"); SEAMS.append((int(a) // 1000000, int(b) // 1000000))
 DBG = set(os.environ.get("DBG_DIFF", "").split(",")) - {""}   # 要逐秒打印有差秒的列名
 WIN = {"f0": 2, "f1": 2, "f2": 2, "f3": 60, "f4": 10, "f5": 60, "f6": 300,
-       "f7": 300, "f8": 7200, "f9": 43200, "mid": 1, "pdiff_v2": 1, "mean_v2": 43200}
+       "f7": 300, "f8": 7200, "f9": 43200, "mid": 1, "pdiff_v2": 1, "mean_v2": 43200,
+       "v300": 300, "rv_60m": 3660}   # rv_60m 需 60min(3600s)分钟窗 + 1min 收尾 → 3660s 暖机
 def seam_hit(col, q_us):
     qs = q_us // 1000000; w = WIN[col]
     for lo, hi in SEAMS:
@@ -38,7 +39,8 @@ COLS = ["ts","side","price","amount"] + [f"bp{i}" for i in range(NL)] + [f"ba{i}
        + [f"ap{i}" for i in range(NL)] + [f"aa{i}" for i in range(NL)] + ["trade_id","local_ns"]
 COLMAP = [("f0","f0"),("f1","f1"),("f2","f2"),("f3","f3"),("f4","f4"),("f5","f5"),
           ("f6","f6"),("f7","f7"),("f8","f8"),("f9","f9"),("mid","mid_price")]
-V2COLS = ["pdiff_v2","mean_v2"]
+V2COLS = ["pdiff_v2","mean_v2","v300","rv_60m"]
+MIN_US = 60_000_000   # 1 自然分钟(µs), rv_60m 分钟聚合用
 WORK = os.environ.get("WORK_DIR", "/root/tf_new/srv2_work")
 DEMUX = WORK + "/demux"; FMT = WORK + "/fmt"; FDATE = "20260101"
 
@@ -100,6 +102,64 @@ def recompute_v2(ob_sorted, bn_sorted, secs):
     return out
 
 
+def recompute_extra(okx_paths, secs):
+    """V300 + rv_60m 内联参照(逐字对齐 streaming_engine)。secs=已结算秒(升序)。返回 {q:(v300, rv_60m)}。
+
+    V300  : 复刻 compute_day 的 grid 构建(B._grid_raw → abs_vol cumsum), 再 300s 窗(= f3/f4 同口径 cs_avol)。
+    rv_60m: 对 grid 秒末 mid 按自然分钟【顺序 f64 求和】得均价(匹配 C++ 顺序累加, 非 np.mean 的 pairwise),
+            相邻分钟 log return, 固定 60-行样本方差 var=(Σx²−Σx²/60)/59 ×√1440, as-of 到「最近完整分钟」。
+    """
+    grids = []
+    for p in sorted(okx_paths):
+        df = B._load_pq(p)
+        if df is None or df.empty: continue
+        g = B._grid_raw(df)                       # ts_sec, mid, signed_vol, abs_vol(Kahan groupby)
+        if not g.empty: grids.append(g)
+    if not grids: return {}
+    grid = pd.concat(grids, ignore_index=True).sort_values("ts_sec", kind="stable").reset_index(drop=True)
+    grid = grid.groupby("ts_sec", as_index=False).last()
+    ts_arr  = grid["ts_sec"].values.astype(np.int64)
+    mid_arr = grid["mid"].values.astype(float)
+    cs_avol = np.cumsum(grid["abs_vol"].values)
+    q = np.array(sorted(secs), np.int64)
+    v300 = B._rolling_sum(cs_avol, ts_arr, q, 300)     # 与引擎 rolling_sum_asof(cs_avol_, q, 300) 逐位一致
+
+    # 分钟均价(顺序累加, 跨分钟结算 + 末分钟收尾 —— 同 C++ finalize_minute)
+    mids = []; mids_id = []
+    cur_m = None; s = 0.0; c = 0
+    for t, mv in zip(ts_arr, mid_arr):
+        m = int(t) // MIN_US
+        if cur_m is None: cur_m = m
+        if m != cur_m:
+            mids_id.append(cur_m); mids.append(s / c); cur_m = m; s = 0.0; c = 0
+        s += mv; c += 1
+    if c > 0: mids_id.append(cur_m); mids.append(s / c)
+    mids = np.array(mids, float); mids_id = np.array(mids_id, np.int64)
+
+    # 相邻分钟 log return(row 1..) → 固定 60-row 样本 std
+    rv_grid = np.empty(0, float); ret_min_id = np.empty(0, np.int64)
+    if len(mids) >= 2:
+        prev = mids[:-1]; cur = mids[1:]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            r = np.where((prev > 0) & (cur > 0), np.log(cur / prev), 0.0)
+        ret_min_id = mids_id[1:]                        # 每个 return 归属「后一分钟」的 minute_id
+        cs_r = np.cumsum(r); cs_r2 = np.cumsum(r * r)
+        rv_grid = np.full(len(r), np.nan)
+        for j in range(59, len(r)):                     # n=j+1≥60 才有 rv
+            sx  = cs_r[j]  - (cs_r[j - 60]  if j - 60 >= 0 else 0.0)
+            sxx = cs_r2[j] - (cs_r2[j - 60] if j - 60 >= 0 else 0.0)
+            var = (sxx - sx * sx / 60.0) / 59.0         # ddof=1
+            rv_grid[j] = np.sqrt(max(var, 0.0)) * np.sqrt(1440.0)
+
+    out = {}
+    for i, qi in enumerate(q):
+        cm = int(qi) // MIN_US - 1                       # 最近一个已完整结束的分钟
+        idx = bisect.bisect_right(ret_min_id, cm) - 1 if len(ret_min_id) else -1
+        rv = float(rv_grid[idx]) if idx >= 0 else float("nan")
+        out[int(qi)] = (float(v300[i]), rv)
+    return out
+
+
 def process_lid(lid):
     sym = SYMBOLS[lid]
     outdir = f"{FMT}/lid{lid}"; os.makedirs(outdir, exist_ok=True)
@@ -144,6 +204,7 @@ def process_lid(lid):
     okx = sorted(glob.glob(f"{outdir}/okx_swap_{sym}_*.parquet"))
     bnp = sorted(glob.glob(f"{outdir}/binance_swap_{sym}_*.parquet"))
     v2 = recompute_v2(ob_sorted, bn_sorted, sorted(stored))
+    extra = recompute_extra(okx, sorted(stored))   # V300 + rv_60m(与 f3/f4 同 okx parquet)
     agg = {k: 0.0 for k, _ in COLMAP}; nd = {k: 0 for k, _ in COLMAP}; exc = {k: 0 for k, _ in COLMAP}
     aggv = {k: 0.0 for k in V2COLS}; ndv = {k: 0 for k in V2COLS}; excv = {k: 0 for k in V2COLS}; tot = 0
     for D in sorted(set(dateof(t) for t in stored)):
@@ -165,7 +226,7 @@ def process_lid(lid):
                     nd[sk] += 1
                     if sk in DBG:   # DBG_DIFF=f9,... → 打出该列每个有差秒(定位用)
                         print(f"  DIFF {sk} {sym} ts={t} 引擎={fac[sk]!r} 离线={getattr(rr, rk)!r} |d|={dd:.4e}", flush=True)
-            rv2 = v2.get(t, (float("nan"), 0.0))
+            rv2 = v2.get(t, (float("nan"), 0.0)) + extra.get(t, (float("nan"), float("nan")))  # (pdiff_v2,mean_v2,v300,rv_60m)
             for idx, k in enumerate(V2COLS):
                 if seam_hit(k, t): excv[k] += 1; continue
                 dd = neq(fac[k], rv2[idx])
