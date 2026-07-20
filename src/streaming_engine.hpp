@@ -55,7 +55,7 @@ public:
     }
 
     void finish() {                                  // 结算最后未闭合的秒
-        if (started_) { settle_bn_sec(); settle_okx_sec(); }
+        if (started_) { settle_bn_sec(); settle_okx_sec(); finalize_minute(); }  // 补最后未闭合分钟(rv_60m)
     }
 
     const Features& features() const { return out_; }
@@ -67,6 +67,12 @@ public:
     // factor_calc_v2 口径旁路(与 out_ 逐行对齐): pdiff_v2=(bn-okx)/okx×1e9(桶末); mean_v2=其 12h 均值(≥3h valid, 否则 0)。
     const std::vector<double>& pdiff_v2_series() const { return pdiff_v2_; }
     const std::vector<double>& mean_v2_series()  const { return mean_v2_; }
+
+    // CAP/volgate 旁路(与 out_ 逐行对齐):
+    //  trade_notional_ = 最近 300s Σ|amount|·price(未乘 ctVal; = cs_avol_ 的 300s 窗, 同 f3/f4 口径)。
+    //  rv60m_          = 分钟均价收益 60min 滚动样本 std×√1440; 暖机<61 个完整分钟=NaN(fail-closed)。
+    const std::vector<double>& trade_notional_series() const { return trade_notional_; }
+    const std::vector<double>& rv60m_series()          const { return rv60m_; }
 
     // 源 raw 旁路(与 out_ 逐行对齐):每行=该秒引擎实际消费的原始事件(OB 约简快照/成交/BN)。
     // 逐字留存, 喂回引擎即逐位复现该行因子 —— 取代 id lo/hi 摘要。emit dump 后置空释放(非 const)。
@@ -168,7 +174,41 @@ private:
 
         prev_mid_ = mid; have_prev_mid_ = true;
 
+        // rv_60m 分钟聚合: 跨分钟先结算上一分钟(finalize_minute), 再把本秒 mid 累进当前分钟均价。
+        // 顺序 f64 累加(同内联参照的 Python 顺序求和), mmean = Σmid/cnt。缺失分钟自然跳过(无 settle 秒→无累积)。
+        const int64_t m = q / MINUTE_US;
+        if (!have_minute_) { cur_minute_id_ = m; minute_sum_ = 0.0; minute_cnt_ = 0; have_minute_ = true; }
+        if (m != cur_minute_id_) {                    // 进入新分钟 → 结算上一分钟(可能跨多分钟, 中间空分钟无行)
+            finalize_minute();
+            cur_minute_id_ = m; minute_sum_ = 0.0; minute_cnt_ = 0;
+        }
+        minute_sum_ += mid; ++minute_cnt_;
+
         emit_features(q, mid, imb1, imb5, spread);
+    }
+
+    // 结算 cur_minute_id_ 分钟: mmean=Σmid/cnt → 相邻分钟 log return → 60-行样本 std×√1440。
+    // returns 序列从第 2 个完整分钟起(首分钟无 diff); rv 需 60 个 return(n≥60), 否则该分钟 NaN。
+    // 逐字对齐内联 numpy 参照: var=(Σx²−Σx²/60)/59 (ddof=1), 固定 60-行窗(按行非按墙钟)。
+    void finalize_minute() {
+        if (!have_minute_ || minute_cnt_ <= 0) return;
+        const double mmean = minute_sum_ / static_cast<double>(minute_cnt_);
+        if (have_prev_mmean_) {
+            const double r = (prev_mmean_ > 0.0 && mmean > 0.0) ? std::log(mmean / prev_mmean_) : 0.0;
+            minute_id_grid_.push_back(cur_minute_id_);
+            cs_r_.push_back((cs_r_.empty()  ? 0.0 : cs_r_.back())  + r);
+            cs_r2_.push_back((cs_r2_.empty() ? 0.0 : cs_r2_.back()) + r * r);
+            const std::size_t n = cs_r_.size();       // 已积累的 return 数
+            double rv = std::numeric_limits<double>::quiet_NaN();
+            if (n >= 60) {                            // 末 60 个 return: 索引 [n-60, n-1]
+                const double sx  = cs_r_[n - 1]  - (n >= 61 ? cs_r_[n - 61]  : 0.0);
+                const double sxx = cs_r2_[n - 1] - (n >= 61 ? cs_r2_[n - 61] : 0.0);
+                const double var = (sxx - sx * sx / 60.0) / 59.0;   // ddof=1
+                rv = std::sqrt(std::max(var, 0.0)) * std::sqrt(1440.0);
+            }
+            rv60_grid_.push_back(rv);
+        }
+        prev_mmean_ = mmean; have_prev_mmean_ = true;
     }
 
     // 逐秒 f0-f9(与 compute_day 逐秒部分逐字一致: 同 rolling_sum_asof / grid_value_asof)
@@ -201,6 +241,14 @@ private:
         const double mean_v2 = (pm_12h_n >= 10800.0 && pm_12h_n > 0.0)
                                  ? static_cast<double>(static_cast<std::int64_t>((mv2_s / pm_12h_n / 1e9) * 1e9)) : 0.0;
         mean_v2_.push_back(mean_v2);
+
+        // V300: cs_avol_ 的 300s 窗(= Σ|amount|·price, 同 f3/f4 abs_vol 口径; 未乘 ctVal)。
+        trade_notional_.push_back(rolling_sum_asof(cs_avol_, ts_sec_, q, 300));
+        // rv_60m: as-of 到「最近一个已完整结束的分钟」(completed=q 所在分钟−1); 无则 NaN(暖机 fail-closed)。
+        const int64_t completed_min = q / MINUTE_US - 1;
+        const std::int64_t rmi = prev_index(minute_id_grid_, completed_min);
+        rv60m_.push_back(rmi >= 0 ? rv60_grid_[static_cast<std::size_t>(rmi)]
+                                  : std::numeric_limits<double>::quiet_NaN());
 
         out_.ts_us.push_back(q);
         out_.f0.push_back(imb1);  out_.f1.push_back(imb5);  out_.f2.push_back(spread);
@@ -247,7 +295,7 @@ private:
     std::vector<double>  av_series_, sv_series_;
     std::size_t          rebase_count_ = 0;
     static constexpr double      REBASE_THRESHOLD = 2e10;   // cs_avol 超此值触发(约 1 天量级); ≫ --verify 窗
-    static constexpr std::size_t REBASE_KEEP      = 130;    // 重累保留的条目数(>60s 窗 + 余量; 每条≥1s → ≥130s)
+    static constexpr std::size_t REBASE_KEEP      = 360;    // 重累保留的条目数(>300s 窗 for V300 + 余量; 每条≥1s → ≥360s)
     double prev_mid_      = 0.0;
     bool   have_prev_mid_ = false;
 
@@ -265,6 +313,22 @@ private:
     // ── factor_calc_v2 口径旁路: pdiff_v2=(bn-okx)/okx×1e9(桶末); mean_v2=其 12h 均值(≥3h valid) ──
     std::vector<double> cs_pdiff_v2_;
     std::vector<double> pdiff_v2_, mean_v2_;   // 与 out_ 逐行对齐; 不进 f0-f9
+
+    // ── CAP/volgate 旁路(与 out_ 逐行对齐) ──
+    std::vector<double> trade_notional_;   // V300 = cs_avol_ 的 300s 窗(未乘 ctVal)
+    std::vector<double> rv60m_;            // 分钟均价收益 60min 样本 std×√1440; 暖机=NaN
+
+    // ── rv_60m 分钟聚合层(秒网格之外的独立分钟网格) ──
+    static constexpr int64_t MINUTE_US = 60 * GRID_US;   // 1 自然分钟(µs)
+    int64_t cur_minute_id_ = 0;            // 当前累积中的分钟 id(= ts/MINUTE_US)
+    double  minute_sum_    = 0.0;          // 当前分钟内 mid 顺序累加
+    int64_t minute_cnt_    = 0;            // 当前分钟内 settle 秒数
+    bool    have_minute_   = false;
+    double  prev_mmean_    = 0.0;          // 上一完整分钟均价(算 log return)
+    bool    have_prev_mmean_ = false;
+    std::vector<int64_t> minute_id_grid_;  // 每个完整分钟(有 return 者)的 minute_id, 单调; as-of 用
+    std::vector<double>  cs_r_, cs_r2_;    // 分钟 log return 的 Σr / Σr²(固定 60-行窗样本方差)
+    std::vector<double>  rv60_grid_;       // 与 minute_id_grid_ 逐行对齐: 该分钟的 rv_60m(n<60=NaN)
 
     // ── 源 raw:当前秒事件缓冲(settle move 走, 未结算秒 carry-forward)+ 逐行历史(emit dump 后置空释放) ──
     std::vector<ObEvent>    ob_cur_;

@@ -67,7 +67,8 @@ inline void read_funding(const FundingShm* fsh, int lid, std::int64_t row_ts_ns,
 // 写该 LID 的最新一行到段(µs→ns)。pdiff/funding 为透传值(NaN=无),finite 则置对应 valid bit。
 inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Features& fe,
                          double pdiff, double pdiff_v2, double mean_v2,
-                         double okx_funding, double bn_funding, std::int64_t first_ts) {
+                         double okx_funding, double bn_funding,
+                         double v300, double rv_60m, std::int64_t first_ts) {
   const std::size_t i = fe.rows() - 1;
   const std::int64_t span_s = (fe.ts_us[i] - first_ts) / 1'000'000;
   std::uint16_t mask = valid_mask_of(span_s);
@@ -76,10 +77,14 @@ inline void write_latest(v2::FactorBoard* out, int lid, const tick_feat::Feature
   if (span_s >= 10800) mask |= (1u << 13);           // mean_v2→bit13(≥3h 有效样本)
   if (std::isfinite(okx_funding)) mask |= (1u << 14); // okx_funding→bit14
   if (std::isfinite(bn_funding))  mask |= (1u << 15); // bn_funding→bit15
+  std::uint32_t mask_ext = 0;
+  if (span_s >= 300) mask_ext |= (1u << 0);          // v300→ext bit0(300s 窗填满)
+  if (std::isfinite(rv_60m)) mask_ext |= (1u << 1);  // rv_60m→ext bit1(暖机满则有限值, 否则 NaN 不置)
   const double f10[v2::kNumFactors] = {fe.f0[i], fe.f1[i], fe.f2[i], fe.f3[i], fe.f4[i],
                                        fe.f5[i], fe.f6[i], fe.f7[i], fe.f8[i], fe.f9[i]};
   v2::factor_write(out->slot[lid], fe.ts_us[i] * 1000, static_cast<std::uint16_t>(lid),
-                   mask, f10, fe.mid_price[i], pdiff, pdiff_v2, mean_v2, okx_funding, bn_funding);
+                   mask, mask_ext, f10, fe.mid_price[i], pdiff, pdiff_v2, mean_v2,
+                   okx_funding, bn_funding, v300, rv_60m);
 }
 
 // 全精度 double → JSON(NaN→null 保合法 JSON;finite 用 %.17g round-trip 可逐位复现)。
@@ -93,6 +98,7 @@ inline void append_f17(std::string& s, double v) {
 // ob=[ts,bid_px0,ask_px0, bid_sz0..4, ask_sz0..4, update_id]; tr=[ts,side,price_scaled,amount,exch_ns,trade_id]; bn=[ts,bid_px0,ask_px0,update_id]。
 inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe, double pdiff,
                      double pdiff_v2, double mean_v2, double okx_funding, double bn_funding,
+                     double v300, double rv_60m,
                      const tf::StreamingFeatureEngine::RawBucket& rb, std::size_t k) {
   std::string j; j.reserve(8192);
   j += "{\"lid\":"; j += std::to_string(lid);
@@ -108,6 +114,8 @@ inline void dump_row(quill::Logger* dump, int lid, const tick_feat::Features& fe
   j += ",\"mean_v2\":"; append_f17(j, mean_v2);     // 其 12h 均值(≥3h valid, 否则 0)
   j += ",\"okx_funding\":"; append_f17(j, okx_funding);  // OKX 资金费率(透传, NaN=无/stale)
   j += ",\"bn_funding\":"; append_f17(j, bn_funding);    // BN 资金费率(透传, NaN=无/stale)
+  j += ",\"v300\":"; append_f17(j, v300);        // 300s Σ|amount|·price(未乘 ctVal)
+  j += ",\"rv_60m\":"; append_f17(j, rv_60m);    // 60min 分钟均价收益波动率; 暖机=null(NaN)
   j += "},\"source_raw\":{\"ob\":[";
   for (std::size_t i = 0; i < rb.ob.size(); ++i) {
     const auto& e = rb.ob[i];
@@ -144,6 +152,8 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
     const auto& pd  = eng[lid].pdiff_series();     // 瞬时 pdiff 旁路, 与 fe 逐行对齐
     const auto& pd2 = eng[lid].pdiff_v2_series();  // factor_calc_v2 口径 pdiff, 与 fe 逐行对齐
     const auto& mv2 = eng[lid].mean_v2_series();   // factor_calc_v2 口径 mean(12h), 与 fe 逐行对齐
+    const auto& v3  = eng[lid].trade_notional_series();  // V300(300s Σ|amount|·price), 与 fe 逐行对齐
+    const auto& rv6 = eng[lid].rv60m_series();      // rv_60m(60min 波动率), 与 fe 逐行对齐
     auto&       raw = eng[lid].raw_series();    // 源 raw 旁路(非 const:dump 后置空释放), 与 fe 逐行对齐
     const std::size_t r = fe.rows();
     if (r <= es.last_rows[lid]) continue;
@@ -163,13 +173,14 @@ inline std::size_t emit_settled(EngineSet& eng, v2::FactorBoard* out, EmitState&
                       lid, es.last_emit_ts[lid], fe.ts_us[k], d / 1'000'000 - 1);
         }
       }
-      if (g_dump) dump_row(g_dump, lid, fe, pd[k], pd2[k], mv2[k], okxf, bnf, raw[k], k);  // 逐条落 JSONL(factors+funding+完整 raw;不漏秒)
+      if (g_dump) dump_row(g_dump, lid, fe, pd[k], pd2[k], mv2[k], okxf, bnf, v3[k], rv6[k], raw[k], k);  // 逐条落 JSONL(factors+funding+V300/rv_60m+完整 raw;不漏秒)
       raw[k] = tf::StreamingFeatureEngine::RawBucket{};         // dump 后释放该秒 raw, 防 raw_ 无界增长
       es.last_emit_ts[lid] = fe.ts_us[k];
     }
     emitted += r - es.last_rows[lid];
     es.last_rows[lid] = r;
-    write_latest(out, lid, fe, pd[r - 1], pd2[r - 1], mv2[r - 1], okxf, bnf, es.first_row_ts[lid]);
+    write_latest(out, lid, fe, pd[r - 1], pd2[r - 1], mv2[r - 1], okxf, bnf,
+                 v3[r - 1], rv6[r - 1], es.first_row_ts[lid]);
   }
   return emitted;
 }

@@ -28,12 +28,15 @@ int main(int argc, char** argv) {
   for (int retry = 0; retry < 8; ++retry)
     if (v2::factor_read(board->slot[lid], s)) break;
 
-  std::printf("lid=%d ts_ns=%lld vmask=0x%03x\n", lid, static_cast<long long>(s.ts_ns), s.valid_mask);
+  std::printf("lid=%d ts_ns=%lld vmask=0x%04x vmask_ext=0x%x\n", lid,
+              static_cast<long long>(s.ts_ns), s.valid_mask, s.valid_mask_ext);
   const char* names[v2::kNumFactors] = {"f0 imb1", "f1 imb5", "f2 spread", "f3 svol_ratio", "f4 vpin",
                                         "f5 trend60", "f6 trend300", "f7 rv300", "f8 pm_2h", "f9 pm_12h"};
   for (int i = 0; i < v2::kNumFactors; ++i)
     std::printf("  %-14s = %+.6f   [%s]\n", names[i], s.f[i], (s.valid_mask & (1u << i)) ? "valid" : "warmup");
   std::printf("  mid_price      = %.6f\n", s.mid);
   std::printf("  pdiff(bps)     = %+.6f   [%s]\n", s.pdiff, (s.valid_mask & (1u << 11)) ? "valid" : "no-bn");
+  std::printf("  v300           = %.6g   [%s]\n", s.v300, (s.valid_mask_ext & (1u << 0)) ? "valid" : "warmup");
+  std::printf("  rv_60m         = %.6f   [%s]\n", s.rv_60m, (s.valid_mask_ext & (1u << 1)) ? "valid" : "warmup");
   return 0;
 }
